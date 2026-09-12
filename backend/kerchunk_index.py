@@ -16,8 +16,13 @@ Collection facts (tavg1_2d_aer_Nx, M2T1NXAER):
 - grid: lon 576 (0.625 deg, -180..179.375), lat 361 (0.5 deg, -90..90)
 - aerosol extinction AOT variables at 550 nm: TOTEXTTAU, DUEXTTAU,
   BCEXTTAU, OCEXTTAU, SUEXTTAU, SSEXTTAU
-- granule size ~476 MB/day (all variables); per-variable daily chunk for
-  DUEXTTAU ~= 24*361*576*4 bytes ~= 20 MB if chunked (time, lat, lon)
+- granule size ~476 MB/day (all variables); aerosol variables are chunked
+  (time=1, lat=91, lon=144), i.e. ~52 KB per chunk for DUEXTTAU (f4).
+  A query range-reads only the chunks intersecting (variable, bbox, time)
+  -- far cheaper than the old whole-day-chunk assumption implied.
+- time is PER-FILE: each granule's time units are its own, e.g. "minutes
+  since 2026-08-01 00:30:00". The slicer opens each reference individually
+  and concatenates the decoded datasets; never merge on raw time values.
 
 AUTHENTICATION (important): the bucket is *protected* — anonymous S3
 reads are rejected. Access requires an Earthdata Login account. Set
@@ -41,12 +46,14 @@ resumable: files that already have a reference JSON are skipped.
 Scope it with --limit for a first cheap run; the slicer only needs the
 dates your queries cover.
 
-Chunking caveat: MERRA-2 files are chunked per whole day (and often the
-whole grid) per variable. A bbox slice still fetches the full daily chunk
-for that variable (~20 MB for DUEXTTAU). If per-query byte reads prove
-too heavy, the documented upgrade path is rechunking to Zarr/COG with
-spatial chunks (see README). The builder prints per-variable chunk sizes
-so you can see this before committing.
+Chunking (verified 2026-09-12 on a real granule): MERRA-2 aerosol
+variables are chunked (time=1, lat=91, lon=144), ~52 KB per chunk for
+DUEXTTAU. A bbox slice range-reads only the chunks covering
+(variable, bbox, time), so per-query byte reads are far cheaper than a
+whole-day fetch. If access patterns ever outgrow that, the documented
+upgrade path is rechunking to Zarr/COG with spatial chunks (see README).
+The builder prints per-variable chunk sizes so you can see this before
+committing.
 """
 
 from __future__ import annotations
@@ -194,11 +201,16 @@ def _report_chunking(url: str, refs: dict) -> None:
             meta = json.loads(val)
             shape = meta.get("shape", [])
             chunks = meta.get("chunks", [])
-            nbytes = 1
-            for s in shape:
-                nbytes *= s
-            nbytes *= {"f4": 4, "f8": 8, "i4": 4}.get(meta.get("dtype", ""), 4)
-            print(f"    {var}: shape={shape} chunks={chunks} ~{nbytes/1e6:.1f} MB/day")
+            itemsize = {"f4": 4, "f8": 8, "i4": 4}.get(meta.get("dtype", ""), 4)
+            chunk_bytes = itemsize
+            for c in chunks:
+                chunk_bytes *= c
+            nchunks = 1
+            for s, c in zip(shape, chunks):
+                nchunks *= -(-s // c)
+            total_mb = chunk_bytes * nchunks / 1e6
+            print(f"    {var}: chunks={chunks} ~{chunk_bytes/1e3:.0f} KB/chunk, "
+                  f"{nchunks} chunks/day (~{total_mb:.1f} MB/day total)")
             if len(seen) >= 8:
                 break
     except Exception as exc:  # never fail the build over a report

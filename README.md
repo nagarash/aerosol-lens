@@ -114,12 +114,16 @@ Notes and limitations:
 - The builder scans the full 5.12.4 collection directory; scope a first
   run with `--limit` and extend later — the slicer only serves dates
   present in the manifest (422 otherwise).
-- MERRA-2 files are chunked per whole day per variable, so a bbox slice
-  still range-reads the full daily chunk for that variable
-  (~20 MB for `DUEXTTAU`). The builder prints per-variable chunk sizes
-  so you can see this before committing; if per-query reads prove too
-  heavy, rechunk to Zarr/COG with spatial chunks (the documented
-  upgrade path).
+- MERRA-2 aerosol variables are chunked `(time=1, lat=91, lon=144)`
+  (~52 KB per chunk for `DUEXTTAU`), so a query range-reads only the
+  chunks intersecting (variable, bbox, time) — far cheaper than a
+  whole-day fetch. The builder prints per-variable chunk sizes so you can
+  see this before committing; if per-query reads ever prove too heavy,
+  rechunk to Zarr/COG with spatial chunks (the documented upgrade path).
+- MERRA-2 runs several weeks behind real time (newest granule observed
+  2026-08-01 as of 2026-09-12). `/grid` windows entirely newer than the
+  plausible archive edge return 422 saying so plainly; tune the
+  assumption with `MERRA2_LATENCY_DAYS` (default 45).
 - The time window collapses to ONE 2D field: `agg=hourly` averages the
   hourly steps; `daily` averages daily means; `monthly_mean` averages
   monthly means.

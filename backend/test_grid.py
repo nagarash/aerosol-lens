@@ -49,21 +49,24 @@ NLAT, NLON, NTIME = 19, 37, 24  # lats -90..90 step 10, lons -180..180 step 10
 # Synthetic fixtures
 
 
-def make_synthetic_nc(path, day):
+def make_synthetic_nc(path, day, day_index):
     """One MERRA-2-like daily granule: hourly time, lat/lon grid, EXTTAU vars.
 
-    Like real MERRA-2, time uses a FIXED origin ("hours since 1980-01-01")
-    so raw time values are unique across granules — MultiZarrToZarr
-    concatenates on raw values, so per-file origins would silently collapse.
+    Mirrors REAL MERRA-2: each file's time uses a PER-FILE origin in
+    minutes ("minutes since <day> 00:30:00"), so raw time values
+    (0, 60, ..., 1380) are IDENTICAL across granules. Concatenating on raw
+    values (kerchunk MultiZarrToZarr) would silently collapse every day
+    onto the first granule's date -- _open_dataset must open each file
+    individually (decoding time against its own units) and xr.concat the
+    decoded datasets. A per-day value offset makes data misalignment
+    fail the value comparisons too, not just the timestamps.
     """
     import netCDF4
     import warnings
     from datetime import datetime
 
-    origin = datetime(1980, 1, 1)
     base = datetime.fromisoformat(day)
-    # hourly steps at 00:30, 01:30, ..., 23:30 UTC, as absolute hours
-    hours = (base - origin).total_seconds() / 3600.0 + 0.5 + np.arange(NTIME)
+    minutes = 60.0 * np.arange(NTIME)  # 00:30, 01:30, ..., 23:30 UTC
     lats = np.arange(-90, 91, 10, dtype="f4")
     lons = np.arange(-180, 181, 10, dtype="f4")
     assert len(lats) == NLAT and len(lons) == NLON
@@ -72,11 +75,11 @@ def make_synthetic_nc(path, day):
         ds.createDimension("lat", NLAT)
         ds.createDimension("lon", NLON)
         t = ds.createVariable("time", "f8", ("time",))
-        t.units = "hours since 1980-01-01 00:00:00"
+        t.units = f"minutes since {day} 00:30:00"
         t.calendar = "standard"
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", DeprecationWarning)  # netCDF4+numpy2.5
-            t[:] = hours
+            t[:] = minutes
         la = ds.createVariable("lat", "f4", ("lat",))
         la[:] = lats
         la.units = "degrees_north"
@@ -86,10 +89,10 @@ def make_synthetic_nc(path, day):
         tt, yy, xx = np.meshgrid(
             np.arange(NTIME), np.arange(NLAT), np.arange(NLON), indexing="ij"
         )
-        pattern = 0.01 * tt + 0.001 * yy + 0.0001 * xx
+        pattern = 0.01 * tt + 0.001 * yy + 0.0001 * xx + 0.25 * day_index
         for name, offset in (("DUEXTTAU", 0.0), ("TOTEXTTAU", 0.5)):
             v = ds.createVariable(
-                name, "f4", ("time", "lat", "lon"), chunksizes=(6, NLAT, NLON)
+                name, "f4", ("time", "lat", "lon"), chunksizes=(1, NLAT, NLON)
             )
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", DeprecationWarning)
@@ -112,10 +115,10 @@ class grid_harness:
     def __enter__(self):
         self.tmp = tempfile.mkdtemp(prefix="gridtest-")
         files = {}
-        for day in DAYS:
+        for i, day in enumerate(DAYS):
             nc = os.path.join(self.tmp, f"synthetic.{day}.nc")
             ref = os.path.join(self.tmp, f"synthetic.{day}.json")
-            make_synthetic_nc(nc, day)
+            make_synthetic_nc(nc, day, i)
             make_reference(nc, ref)
             files[day] = os.path.basename(ref)
         self.manifest = os.path.join(self.tmp, "index.json")
@@ -128,16 +131,24 @@ class grid_harness:
                 },
                 f,
             )
-        self._saved = os.environ.get("KERCHUNK_INDEX_PATH")
+        self._saved = {
+            k: os.environ.get(k)
+            for k in ("KERCHUNK_INDEX_PATH", "MERRA2_LATENCY_DAYS")
+        }
         os.environ["KERCHUNK_INDEX_PATH"] = self.manifest
+        # Synthetic fixtures use near-today dates; the real archive-latency
+        # default (45d) would reject them. The latency rule itself is tested
+        # separately in test_too_recent_window_explains_archive_latency.
+        os.environ["MERRA2_LATENCY_DAYS"] = "0"
         grid_module._load_manifest.cache_clear()
         return self
 
     def __exit__(self, *exc):
-        if self._saved is None:
-            os.environ.pop("KERCHUNK_INDEX_PATH", None)
-        else:
-            os.environ["KERCHUNK_INDEX_PATH"] = self._saved
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         grid_module._load_manifest.cache_clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
         return False
@@ -192,6 +203,60 @@ def test_end_to_end_daily_matches_direct_read():
     )
 
 
+def test_multi_day_time_labels_are_correct():
+    """Each day's steps decode to that day's calendar dates.
+
+    Regression test for the raw-time concatenation bug: real MERRA-2
+    granules share identical RAW time values (per-file "minutes since
+    <day> 00:30:00" origins). The old MultiZarrToZarr path concatenated on
+    raw values, so every day decoded to the FIRST granule's date. The fix
+    opens each reference individually and concats the decoded datasets.
+    """
+    require_geo()
+    with grid_harness() as h:
+        ref_paths = [
+            os.path.join(h.tmp, f"synthetic.{day}.json") for day in DAYS
+        ]
+        ds = grid_module._open_dataset(ref_paths, target_options={})
+        times = ds["time"].values  # tiny fixture; load eagerly
+        ds.close()
+    assert len(times) == 48, f"expected 24+24 steps, got {len(times)}"
+    day1 = times[:24].astype("datetime64[D]")
+    day2 = times[24:].astype("datetime64[D]")
+    assert (day1 == np.datetime64("2026-09-01")).all(), day1[:3]
+    assert (day2 == np.datetime64("2026-09-02")).all(), day2[:3]
+    # hourly steps at 00:30, 01:30, ..., 23:30 UTC per day
+    assert times[0] == np.datetime64("2026-09-01T00:30")
+    assert times[23] == np.datetime64("2026-09-01T23:30")
+    assert times[24] == np.datetime64("2026-09-02T00:30")
+    assert times[47] == np.datetime64("2026-09-02T23:30")
+
+
+def test_too_recent_window_explains_archive_latency():
+    """A window beyond the plausible archive edge gets the latency message.
+
+    MERRA-2 trails real time by weeks; the 422 must say so plainly
+    instead of the generic "no indexed data" message.
+    """
+    require_geo()
+    from datetime import date as _date, timedelta as _timedelta
+
+    with grid_harness():
+        os.environ.pop("MERRA2_LATENCY_DAYS", None)  # real default (45d)
+        try:
+            t0 = _date.today() + _timedelta(days=1)
+            t1 = t0 + _timedelta(days=1)
+            try:
+                get_grid("merra2", "DUEXTTAU", "0,0,10,10",
+                         f"{t0}T00:00:00Z", f"{t1}T23:59:59Z")
+            except BadGridRequestError as exc:
+                assert "several weeks behind" in str(exc), str(exc)
+                return
+            raise AssertionError("expected BadGridRequestError for future window")
+        finally:
+            os.environ["MERRA2_LATENCY_DAYS"] = "0"
+
+
 def test_alias_canonicalization():
     require_geo()
     with grid_harness():
@@ -229,7 +294,9 @@ def test_antimeridian_bbox_wraps():
         # [170..180] + [-180..-170]
         assert resp["lons"] == [170.0, 180.0, -180.0, -170.0], resp["lons"]
         assert resp["nx"] == 4
-        direct = h.direct()["DUEXTTAU"]
+        direct = h.direct()["DUEXTTAU"].sel(
+            time=slice("2026-09-01", "2026-09-01T23:59:59")
+        )
         left = direct.sel(lon=slice(170, 180), lat=slice(-20, 20)).mean("time")
         right = direct.sel(lon=slice(-180, -170), lat=slice(-20, 20)).mean("time")
         expected = xr.concat([left, right], dim="lon")
@@ -298,6 +365,7 @@ def test_remote_refs_require_earthdata_credentials():
         for k in (
             "KERCHUNK_INDEX_PATH", "EARTHDATA_TOKEN", "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "MERRA2_S3_ANON",
+            "MERRA2_LATENCY_DAYS",
         )
     }
     try:
@@ -312,8 +380,11 @@ def test_remote_refs_require_earthdata_credentials():
         with open(manifest_path, "w") as f:
             json.dump({"files": {"2026-09-01": "remote.json"}}, f)
         os.environ["KERCHUNK_INDEX_PATH"] = manifest_path
+        # opt out of the archive-latency gate: this test is about the auth
+        # check, and its window postdates the real default edge
+        os.environ["MERRA2_LATENCY_DAYS"] = "0"
         for k in saved:
-            if k != "KERCHUNK_INDEX_PATH":
+            if k not in ("KERCHUNK_INDEX_PATH", "MERRA2_LATENCY_DAYS"):
                 os.environ.pop(k, None)
         grid_module._load_manifest.cache_clear()
         reset_cache()
@@ -337,8 +408,14 @@ def test_remote_refs_require_earthdata_credentials():
 
 def test_missing_index_is_501_naming_env_var():
     require_geo()
-    saved = os.environ.get("KERCHUNK_INDEX_PATH")
+    saved = {
+        k: os.environ.get(k)
+        for k in ("KERCHUNK_INDEX_PATH", "MERRA2_LATENCY_DAYS")
+    }
     os.environ["KERCHUNK_INDEX_PATH"] = "/nonexistent/kerchunk-index.json"
+    # opt out of the archive-latency gate: this test is about the missing
+    # manifest, and its window (2026-09-01) postdates the real default edge
+    os.environ["MERRA2_LATENCY_DAYS"] = "0"
     grid_module._load_manifest.cache_clear()
     try:
         try:
@@ -349,10 +426,11 @@ def test_missing_index_is_501_naming_env_var():
             return
         raise AssertionError("expected IndexNotBuiltError")
     finally:
-        if saved is None:
-            os.environ.pop("KERCHUNK_INDEX_PATH", None)
-        else:
-            os.environ["KERCHUNK_INDEX_PATH"] = saved
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
         grid_module._load_manifest.cache_clear()
 
 

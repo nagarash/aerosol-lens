@@ -2,7 +2,8 @@
 
 Pipeline:
     manifest (KERCHUNK_INDEX_PATH) -> pick reference files for [t0, t1]
-    -> open via fsspec ReferenceFileSystem + kerchunk MultiZarrToZarr
+    -> open each reference individually with xarray (each granule's time
+       decodes against its OWN CF units; xr.concat along time)
     -> select (variable, bbox, time) -> aggregate -> downsample
     -> compact JSON {variable, units, lats, lons, values, ...}
 
@@ -28,7 +29,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -41,6 +42,18 @@ except ImportError:  # run as a script: python backend/grid.py
 
 AGGREGATIONS = ("hourly", "daily", "monthly_mean")
 MAX_NLON, MAX_NLAT = 360, 180
+
+# MERRA-2 trails real time by several weeks. Observed 2026-09-12: the
+# newest published tavg1_2d_aer_Nx granule was 2026-08-01 (~6 weeks
+# behind). A requested window entirely newer than
+# (today - MERRA2_LATENCY_DAYS) gets a 422 that says so plainly, rather
+# than the generic "no indexed data" message. Overridable via env
+# (tests set it to 0 against synthetic fixtures).
+def _latency_days() -> int:
+    try:
+        return max(0, int(os.environ.get("MERRA2_LATENCY_DAYS", "45")))
+    except (TypeError, ValueError):
+        return 45
 
 DEFAULT_INDEX_PATH = str(
     Path(__file__).resolve().parent.parent / "data" / "kerchunk" / "index.json"
@@ -213,35 +226,44 @@ def _refs_for_window(manifest: dict, t0: datetime, t1: datetime) -> list[str]:
 
 
 def _open_dataset(ref_paths: list[str], target_options: dict | None = None):
-    """Open reference files as one xarray dataset (lazy; no data read yet)."""
+    """Open reference files as one xarray dataset (lazy; no data read yet).
+
+    Each granule is opened INDIVIDUALLY so its time coordinate decodes
+    against its own CF units, then the decoded datasets are concatenated
+    along time. This is deliberate: real MERRA-2 granules use PER-FILE
+    time origins (e.g. "minutes since 2026-08-01 00:30:00"), so the raw
+    time values are identical across files. kerchunk's MultiZarrToZarr
+    concatenates on raw values and would silently collapse every day onto
+    the first granule's date; per-file open + xr.concat is the
+    straightforward correct approach.
+    """
     import fsspec
     import xarray as xr
 
-    ref_dicts = []
+    datasets = []
     for p in ref_paths:
         with open(p) as f:
-            ref_dicts.append(json.load(f))
+            refs = json.load(f)
+        fs = fsspec.filesystem(
+            "reference", fo=refs, target_options=target_options or {}
+        )
+        try:
+            datasets.append(
+                xr.open_dataset(fs.get_mapper(""), engine="zarr", chunks={})
+            )
+        except Exception as exc:
+            raise GridFetchError(
+                f"failed to open kerchunk reference {p!r}: {exc}"
+            ) from exc
 
-    if len(ref_dicts) == 1:
-        combined = ref_dicts[0]
-    else:
-        from kerchunk.combine import MultiZarrToZarr
-
-        # NOTE: concatenates on RAW time values, so this assumes the
-        # collection uses a fixed time origin across granules (true for
-        # MERRA-2: "hours since 1980-01-01"). Per-file time origins would
-        # silently collapse to one granule's steps.
-        combined = MultiZarrToZarr(
-            ref_dicts, concat_dims=["time"], identical_dims=["lat", "lon"]
-        ).translate()
-
-    fs = fsspec.filesystem(
-        "reference", fo=combined, target_options=target_options or {}
-    )
+    if len(datasets) == 1:
+        return datasets[0]
     try:
-        return xr.open_dataset(fs.get_mapper(""), engine="zarr", chunks={})
+        return xr.concat(datasets, dim="time")
     except Exception as exc:
-        raise GridFetchError(f"failed to open kerchunk references: {exc}") from exc
+        raise GridFetchError(
+            f"failed to concatenate granules along time: {exc}"
+        ) from exc
 
 
 # --------------------------------------------------------------------------
@@ -398,6 +420,18 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     start, end = _parse_time(t0, "t0"), _parse_time(t1, "t1")
     if end < start:
         raise BadGridRequestError("t1 must be >= t0.")
+    # Archive-latency gate: MERRA-2 runs several weeks behind real time.
+    # A window entirely newer than the plausible archive edge gets a
+    # plain-spoken 422 (checked before the manifest, so the message names
+    # the cause instead of "no indexed data").
+    newest_plausible = date.today() - timedelta(days=_latency_days())
+    if start.date() > newest_plausible:
+        raise BadGridRequestError(
+            f"no MERRA-2 data yet for {start.date()}..{end.date()}: the "
+            f"MERRA-2 archive runs several weeks behind real time "
+            f"(newest plausible granule ~{newest_plausible}). "
+            "Narrow the window to earlier dates."
+        )
     manifest = _load_manifest(_index_path())
     ref_paths = _refs_for_window(manifest, start, end)
     if target_options is None:
