@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Aerosol Lens</title>
+  <link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <link href="styles.css" rel="stylesheet" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <!-- Mode toggle: never mix surface and column in one view -->
+  <div id="mode-toggle" class="panel">
+    <button data-mode="health" class="active">Air quality</button>
+    <button data-mode="plume">Plume view</button>
+  </div>
+
+  <!-- Legend: units + colorbar + thresholds. Non-negotiable for trust. -->
+  <div id="legend" class="panel">
+    <div id="legend-title">PM2.5</div>
+    <div id="legend-bar"></div>
+    <div id="legend-labels"><span id="legend-min"></span><span id="legend-units"></span><span id="legend-max"></span></div>
+    <div id="legend-guideline"></div>
+  </div>
+
+  <!-- Time scrubber + play (stub: wired to frame prefetching later) -->
+  <div id="timebar" class="panel">
+    <button id="play-btn" title="Play animation">▶</button>
+    <input id="time-slider" type="range" min="0" max="0" value="0" />
+    <span id="time-label"></span>
+  </div>
+
+  <!-- Chat: natural language -> QueryPlan -->
+  <div id="chat" class="panel">
+    <div id="chat-log"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" autocomplete="off"
+             placeholder="e.g. Is it safe to run in Delhi today? / Show me the Saharan dust plume" />
+      <button type="submit">Ask</button>
+    </form>
+    <div id="chat-caption"></div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

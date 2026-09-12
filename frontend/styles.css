@@ -1,0 +1,82 @@
+/* Aerosol Lens: dark map, data-first UI. */
+
+html, body {
+  margin: 0;
+  height: 100%;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0b0e14;
+  color: #e6e9ef;
+}
+
+#map {
+  position: absolute;
+  inset: 0;
+}
+
+.panel {
+  position: absolute;
+  background: rgba(13, 17, 23, 0.88);
+  border: 1px solid #2a3340;
+  border-radius: 10px;
+  padding: 10px 12px;
+  backdrop-filter: blur(6px);
+  z-index: 10;
+}
+
+#mode-toggle { top: 12px; left: 12px; display: flex; gap: 6px; }
+#mode-toggle button {
+  background: #1c2330;
+  color: #cfd6e2;
+  border: 1px solid #2a3340;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+#mode-toggle button.active { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+
+#legend { left: 12px; bottom: 76px; width: 220px; }
+#legend-title { font-weight: 600; margin-bottom: 6px; }
+#legend-bar { height: 12px; border-radius: 3px; background: #333; }
+#legend-labels { display: flex; justify-content: space-between; font-size: 11px; color: #9aa4b2; margin-top: 4px; }
+#legend-guideline { font-size: 11px; color: #ffb86b; margin-top: 4px; }
+
+#timebar {
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: min(520px, 80vw);
+}
+#time-slider { flex: 1; }
+#play-btn {
+  background: #2f6fed;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+#time-label { font-size: 12px; color: #9aa4b2; white-space: nowrap; }
+
+#chat { right: 12px; bottom: 12px; width: 340px; display: flex; flex-direction: column; gap: 8px; }
+#chat-log { max-height: 180px; overflow-y: auto; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+#chat-form { display: flex; gap: 6px; }
+#chat-input {
+  flex: 1;
+  background: #1c2330;
+  border: 1px solid #2a3340;
+  border-radius: 6px;
+  color: #e6e9ef;
+  padding: 8px;
+}
+#chat-form button {
+  background: #2f6fed;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+#chat-caption { font-size: 12px; color: #9aa4b2; font-style: italic; }

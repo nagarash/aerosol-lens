@@ -1,0 +1,32 @@
+services:
+  backend:
+    build: ./backend
+    env_file: .env
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      # kerchunk reference JSONs live here once built (see backend/kerchunk_index.py)
+      - ./data/kerchunk:/srv/data/kerchunk:ro
+    restart: unless-stopped
+
+  frontend:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ---- Future: preprocessed COG + TiTiler path ----
+  # Uncomment when hot variables are converted to Cloud-Optimized GeoTIFFs
+  # and slippy-map tiles with CDN caching beat client-side grid rendering.
+  #
+  # titiler:
+  #   image: ghcr.io/developmentseed/titiler:latest
+  #   ports:
+  #     - "8001:8000"
+  #   volumes:
+  #     - ./data/cog:/data:ro
+  #   profiles: ["titiler"]
