@@ -39,11 +39,15 @@ class PlanCache:
         self.hits = 0
         self.misses = 0
 
-    def _key(self, question: str) -> str:
-        return hashlib.sha256(normalize_question(question).encode()).hexdigest()
+    def _key(self, question: str, scope: str = "") -> str:
+        # Scope disambiguates identical questions asked on different days or
+        # from different locations ("last week", "here"). Callers pass
+        # scope=f"{reference_date}|{user_location or ''}".
+        raw = normalize_question(question) + "\x00" + scope
+        return hashlib.sha256(raw.encode()).hexdigest()
 
-    def get(self, question: str) -> Optional[QueryPlan]:
-        k = self._key(question)
+    def get(self, question: str, scope: str = "") -> Optional[QueryPlan]:
+        k = self._key(question, scope)
         with self._lock:
             plan = self._store.get(k)
             if plan is None:
@@ -53,8 +57,8 @@ class PlanCache:
             self.hits += 1
             return plan
 
-    def put(self, question: str, plan: QueryPlan) -> None:
-        k = self._key(question)
+    def put(self, question: str, plan: QueryPlan, scope: str = "") -> None:
+        k = self._key(question, scope)
         with self._lock:
             self._store[k] = plan
             self._store.move_to_end(k)

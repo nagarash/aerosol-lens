@@ -9,21 +9,24 @@ from .mappings import AEROSOL_WORD_TO_VARIABLE, INTENT_DEFAULTS, SOURCE_TIME_RUL
 
 SYSTEM_PROMPT = """\
 You translate a user's natural-language question about air quality or \
-atmospheric aerosols into a single JSON QueryPlan. Output ONLY the JSON \
+atmospheric aerosols into a single JSON plan draft. Output ONLY the JSON \
 object, no prose.
 
-QueryPlan schema:
+You NEVER emit coordinates or bounding boxes. You return a PLACE NAME; the \
+backend resolves it to a bounding box from its own gazetteer. Invented \
+coordinates are impossible by design -- do not try.
+
+Plan draft schema:
 {
   "intent": "health" | "plume" | "comparison",
   "level": "surface" | "column",
   "source": "google" | "merra2" | "cams",
   "variable": "PM25" | "PM10" | "DUAOD" | "BCAOD" | "OCAOD" | "SUAOD" | "SSAOD" | "TOTEXTTAU",
-  "bbox": [west, south, east, north],   // decimal degrees, WGS84
+  "place": "place name, e.g. 'Delhi', 'Sahara', 'US Midwest'",
   "time_start": "YYYY-MM-DDTHH:MM:SSZ",
   "time_end": "YYYY-MM-DDTHH:MM:SSZ",
   "aggregation": "hourly" | "daily" | "monthly_mean",
   "style": {"colormap": "aqi" | "aod_sequential", "mode": "continuous" | "exceedance", "opacity": 0.65},
-  "place_name": "human-readable place, if any",
   "caption": "one-line description of the query"
 }
 
@@ -46,11 +49,14 @@ Time rules:
   prefer the event catalog (data/event_catalog.sample.json) over guessing.
 
 Place rules:
-- Resolve named places to a bounding box using the gazetteer
-  (data/gazetteer.sample.json). If the place is unknown, estimate a sensible
-  bbox and set place_name to the raw string.
-- "here"/"my area" -> the user's location, supplied as USER_LOCATION if known;
-  otherwise ask for it (return {"error": "need_location"}).
+- "place" is a NAME, never coordinates. The backend resolves names to
+  bounding boxes from its own gazetteer; unknown names are reported as
+  errors, never guessed at.
+- Prefer the KNOWN_PLACES names appended to this prompt when the question
+  refers to one ("Sahara desert" -> "Sahara", "New Delhi" -> "Delhi").
+- If nothing matches, return your best single place name anyway.
+- "here"/"my area" -> "place" = the USER_LOCATION string when provided;
+  otherwise return {"error": "need_location"} and nothing else.
 
 Style rules:
 - intent="health" -> colormap="aqi", mode="exceedance" when the question is
@@ -74,9 +80,7 @@ def build_user_message(question: str, reference_date: str, user_location: str | 
     return msg
 
 
-# TODO(integration): wire SYSTEM_PROMPT + build_user_message() into a
-# litellm.completion() call with response_format={"type": "json_object"}
-# (or the provider's structured-output equivalent), model from
-# os.environ["LITELLM_MODEL"]. Parse the JSON into QueryPlan, run
-# validate_plan(), and on ValidationError retry once with the error text
-# appended before giving up.
+# NOTE: the parse step is wired in backend/app.py::_parse_with_agent, which
+# uses SYSTEM_PROMPT + build_user_message() with litellm.completion(),
+# response_format={"type": "json_object"}, model from LITELLM_MODEL, and
+# appends backend/geocode.py::known_places_hint() to the system prompt.

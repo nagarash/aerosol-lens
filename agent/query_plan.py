@@ -17,6 +17,13 @@ Aggregation = Literal["hourly", "daily", "monthly_mean"]
 ViewMode = Literal["continuous", "exceedance"]
 
 
+def _ensure_time_order(time_end: datetime, time_start: datetime | None) -> datetime:
+    """Shared time-order check for QueryPlan and QueryPlanDraft."""
+    if time_start is not None and time_end < time_start:
+        raise ValueError("time_end must be >= time_start")
+    return time_end
+
+
 class StyleSpec(BaseModel):
     """How the result should be rendered. Never affects which data is fetched."""
 
@@ -92,7 +99,71 @@ class QueryPlan(BaseModel):
     @field_validator("time_end")
     @classmethod
     def _check_time_order(cls, v: datetime, info) -> datetime:
-        start = info.data.get("time_start")
-        if start is not None and v < start:
-            raise ValueError("time_end must be >= time_start")
-        return v
+        return _ensure_time_order(v, info.data.get("time_start"))
+
+    @classmethod
+    def from_draft(
+        cls, draft: "QueryPlanDraft", bbox: list[float], place_name: str
+    ) -> "QueryPlan":
+        """Build an executable plan from a validated draft + resolved bbox.
+
+        The draft carries the model's language understanding (intent, level,
+        variable, time window); the bbox comes from deterministic geocoding,
+        never from the model.
+        """
+        data = draft.model_dump(exclude={"place", "error"})
+        data["bbox"] = bbox
+        data["place_name"] = place_name
+        return cls(**data)
+
+
+class QueryPlanDraft(BaseModel):
+    """What the LLM emits. Deliberately has NO bbox.
+
+    The model returns a place NAME; the backend resolves it to coordinates
+    via the local gazetteer (backend/geocode.py). Keeping coordinates out
+    of the model's output makes coordinate hallucination structurally
+    impossible: the model never sees or emits geography as numbers.
+    """
+
+    intent: Intent = Field(
+        description="Same semantics as QueryPlan.intent."
+    )
+    level: Level = Field(description="Same semantics as QueryPlan.level.")
+    source: Source = Field(description="Same semantics as QueryPlan.source.")
+    variable: str = Field(
+        description="Dataset variable, e.g. 'PM25', 'DUAOD', 'TOTEXTTAU'."
+    )
+    place: Optional[str] = Field(
+        default=None,
+        description="Place NAME only, e.g. 'Delhi', 'Sahara', 'US Midwest'. "
+        "Never coordinates; the backend resolves the name to a bbox. "
+        "May be omitted only when 'error' is set.",
+    )
+    time_start: datetime = Field(description="Inclusive start of the time window (UTC).")
+    time_end: datetime = Field(description="Inclusive end of the time window (UTC).")
+    aggregation: Aggregation = Field(default="daily")
+    style: StyleSpec = Field(default_factory=StyleSpec)
+    place_name: Optional[str] = Field(
+        default=None, description="Echo of the place; backend overwrites with the canonical gazetteer name."
+    )
+    caption: Optional[str] = Field(default=None)
+    error: Optional[str] = Field(
+        default=None,
+        description="Set to 'need_location' (and nothing else) when the "
+        "question needs the user's location ('here'/'my area') and none was provided.",
+    )
+
+    @field_validator("place")
+    @classmethod
+    def _check_place(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v  # allowed only when error='need_location'
+        if not v.strip():
+            raise ValueError("place must be a non-empty place name")
+        return v.strip()
+
+    @field_validator("time_end")
+    @classmethod
+    def _check_time_order(cls, v: datetime, info) -> datetime:
+        return _ensure_time_order(v, info.data.get("time_start"))
