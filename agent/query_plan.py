@@ -10,6 +10,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from .mappings import canonical_variable
+
 Intent = Literal["health", "plume", "comparison"]
 Level = Literal["surface", "column"]
 Source = Literal["google", "merra2", "cams"]
@@ -57,8 +59,9 @@ class QueryPlan(BaseModel):
         "'cams' = historical surface PM2.5/PM10."
     )
     variable: str = Field(
-        description="Dataset variable, e.g. 'PM25', 'PM10', 'DUAOD' (dust AOD), "
-        "'BCAOD', 'OCAOD', 'TOTEXTTAU' (total AOD)."
+        description="Dataset variable, e.g. 'PM25', 'PM10', 'DUEXTTAU' (dust AOD), "
+        "'BCEXTTAU', 'OCEXTTAU', 'TOTEXTTAU' (total AOD). "
+        "Legacy aliases (e.g. 'DUAOD') are canonicalized automatically."
     )
     bbox: list[float] = Field(
         description="Bounding box [west, south, east, north] in decimal degrees, "
@@ -101,6 +104,13 @@ class QueryPlan(BaseModel):
     def _check_time_order(cls, v: datetime, info) -> datetime:
         return _ensure_time_order(v, info.data.get("time_start"))
 
+    @field_validator("variable")
+    @classmethod
+    def _canonicalize_variable(cls, v: str) -> str:
+        # Accept legacy aliases ("DUAOD") and normalize to the true
+        # MERRA-2 dataset names ("DUEXTTAU") before anything validates.
+        return canonical_variable(v)
+
     @classmethod
     def from_draft(
         cls, draft: "QueryPlanDraft", bbox: list[float], place_name: str
@@ -132,7 +142,8 @@ class QueryPlanDraft(BaseModel):
     level: Level = Field(description="Same semantics as QueryPlan.level.")
     source: Source = Field(description="Same semantics as QueryPlan.source.")
     variable: str = Field(
-        description="Dataset variable, e.g. 'PM25', 'DUAOD', 'TOTEXTTAU'."
+        description="Dataset variable, e.g. 'PM25', 'DUEXTTAU', 'TOTEXTTAU'. "
+        "Legacy aliases (e.g. 'DUAOD') are canonicalized automatically."
     )
     place: Optional[str] = Field(
         default=None,
@@ -167,3 +178,8 @@ class QueryPlanDraft(BaseModel):
     @classmethod
     def _check_time_order(cls, v: datetime, info) -> datetime:
         return _ensure_time_order(v, info.data.get("time_start"))
+
+    @field_validator("variable")
+    @classmethod
+    def _canonicalize_variable(cls, v: str) -> str:
+        return canonical_variable(v)

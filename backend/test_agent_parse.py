@@ -48,6 +48,9 @@ class _FakeResponse:
 class FakeLiteLLM:
     """Scripted litellm stand-in. Script items are JSON strings or Exceptions."""
 
+    class RateLimitError(Exception):
+        """Stands in for litellm.RateLimitError (provider 429)."""
+
     def __init__(self, script):
         self.script = list(script)
         self.calls = []
@@ -109,7 +112,7 @@ def plume_draft(place="Sahara"):
             "intent": "plume",
             "level": "column",
             "source": "merra2",
-            "variable": "DUAOD",
+            "variable": "DUEXTTAU",
             "place": place,
             "time_start": "2026-08-31T00:00:00Z",
             "time_end": "2026-09-06T23:59:59Z",
@@ -131,7 +134,7 @@ def bad_health_column_draft():
             "intent": "health",
             "level": "column",
             "source": "merra2",
-            "variable": "DUAOD",
+            "variable": "DUEXTTAU",
             "place": "Delhi",
             "time_start": "2026-09-11T00:00:00Z",
             "time_end": "2026-09-11T23:59:59Z",
@@ -188,12 +191,12 @@ def test_plume_question_produces_column_plan():
         )
     assert resp.plan.intent == "plume"
     assert resp.plan.level == "column"
-    assert resp.plan.variable == "DUAOD"
+    assert resp.plan.variable == "DUEXTTAU"
     assert resp.plan.source == "merra2"
     assert resp.plan.bbox == SAHARA_BBOX
     assert resp.plan.place_name == "Sahara"
     assert resp.data_url.startswith("/grid?source=merra2")
-    assert "DUAOD" in resp.data_url
+    assert "DUEXTTAU" in resp.data_url
     assert len(fake.calls) == 1
 
 
@@ -294,7 +297,7 @@ def test_guardrail_rejects_health_with_column_directly():
         intent="health",
         level="column",
         source="merra2",
-        variable="DUAOD",
+        variable="DUEXTTAU",
         bbox=SAHARA_BBOX,
         time_start="2026-09-11T00:00:00Z",
         time_end="2026-09-11T23:59:59Z",
@@ -354,6 +357,24 @@ def test_non_json_model_output_retried_then_422():
             ),
         )
     assert "JSON" in exc.detail
+
+
+def test_rate_limit_returns_429_without_consuming_retry():
+    # Uses FakeLiteLLM.RateLimitError so _is_rate_limit() matches via
+    # isinstance, exactly like the real litellm module in production.
+    with harness([FakeLiteLLM.RateLimitError("429 Rate limit exceeded")]) as fake:
+        exc = expect_http(
+            429,
+            lambda: ask(
+                AskRequest(
+                    question="is it safe to run in Delhi today", reference_date=REF
+                )
+            ),
+        )
+    assert len(fake.calls) == 1, (
+        "rate limit must surface immediately, not consume the validation retry"
+    )
+    assert "429" in exc.detail
 
 
 # ---------------------------------------------------------------------------

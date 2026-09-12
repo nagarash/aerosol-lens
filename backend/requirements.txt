@@ -6,4 +6,6 @@ xarray>=2024.1
 fsspec>=2024.1
 kerchunk>=0.2
 h5netcdf>=1.2
+h5py>=3.8
 s3fs>=2024.1
+dask>=2024.1

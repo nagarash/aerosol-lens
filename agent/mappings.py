@@ -15,6 +15,8 @@ class IntentDefaults(TypedDict):
 
 # How the agent should phrase aerosol words as dataset variables.
 # Keys are lowercase trigger words; values are (variable, level) pairs.
+# Column variable names are the true MERRA-2 tavg1_2d_aer_Nx names
+# (extinction aerosol optical thickness at 550 nm, "*EXTTAU").
 AEROSOL_WORD_TO_VARIABLE: dict[str, tuple[str, str]] = {
     # Surface concentrations (health-relevant)
     "pm2.5": ("PM25", "surface"),
@@ -25,18 +27,40 @@ AEROSOL_WORD_TO_VARIABLE: dict[str, tuple[str, str]] = {
     "smog": ("PM25", "surface"),
     "haze": ("PM25", "surface"),
     # Column aerosol optical depth, speciated (plume-relevant)
-    "dust": ("DUAOD", "column"),
-    "saharan dust": ("DUAOD", "column"),
-    "sandstorm": ("DUAOD", "column"),
-    "smoke": ("BCAOD", "column"),  # black carbon traces combustion
-    "wildfire smoke": ("BCAOD", "column"),
-    "ash": ("DUAOD", "column"),  # volcanic ash reads closest to dust AOD
-    "volcanic": ("SUAOD", "column"),  # sulfate from eruptions
-    "sulfate": ("SUAOD", "column"),
-    "sea salt": ("SSAOD", "column"),
+    "dust": ("DUEXTTAU", "column"),
+    "saharan dust": ("DUEXTTAU", "column"),
+    "sandstorm": ("DUEXTTAU", "column"),
+    "smoke": ("BCEXTTAU", "column"),  # black carbon traces combustion
+    "wildfire smoke": ("BCEXTTAU", "column"),
+    "ash": ("DUEXTTAU", "column"),  # volcanic ash reads closest to dust AOD
+    "volcanic": ("SUEXTTAU", "column"),  # sulfate from eruptions
+    "sulfate": ("SUEXTTAU", "column"),
+    "sea salt": ("SSEXTTAU", "column"),
     "aerosol": ("TOTEXTTAU", "column"),
     "aod": ("TOTEXTTAU", "column"),
 }
+
+# Legacy/alternate spellings for MERRA-2 column variables, canonicalized
+# to the true "*EXTTAU" names before validation. Kept so older cached plans
+# and hand-written queries using the pre-v1 shorthand still resolve.
+MERRA2_VARIABLE_ALIASES: dict[str, str] = {
+    "DUAOD": "DUEXTTAU",
+    "BCAOD": "BCEXTTAU",
+    "OCAOD": "OCEXTTAU",
+    "SUAOD": "SUEXTTAU",
+    "SSAOD": "SSEXTTAU",
+    "TOTAOD": "TOTEXTTAU",
+}
+
+# All column variables the MERRA-2 slicer knows how to serve.
+MERRA2_COLUMN_VARIABLES: frozenset[str] = frozenset(
+    {"TOTEXTTAU", "DUEXTTAU", "BCEXTTAU", "OCEXTTAU", "SUEXTTAU", "SSEXTTAU"}
+)
+
+
+def canonical_variable(name: str) -> str:
+    """Map a variable name (or legacy alias) to its canonical dataset name."""
+    return MERRA2_VARIABLE_ALIASES.get(name.strip().upper(), name.strip().upper())
 
 # Default source/level/aggregation per intent. The agent may override the
 # source when the time window demands it (see SOURCE_TIME_RULES below).

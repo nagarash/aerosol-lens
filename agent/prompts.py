@@ -21,7 +21,7 @@ Plan draft schema:
   "intent": "health" | "plume" | "comparison",
   "level": "surface" | "column",
   "source": "google" | "merra2" | "cams",
-  "variable": "PM25" | "PM10" | "DUAOD" | "BCAOD" | "OCAOD" | "SUAOD" | "SSAOD" | "TOTEXTTAU",
+  "variable": "PM25" | "PM10" | "DUEXTTAU" | "BCEXTTAU" | "OCEXTTAU" | "SUEXTTAU" | "SSEXTTAU" | "TOTEXTTAU",
   "place": "place name, e.g. 'Delhi', 'Sahara', 'US Midwest'",
   "time_start": "YYYY-MM-DDTHH:MM:SSZ",
   "time_end": "YYYY-MM-DDTHH:MM:SSZ",

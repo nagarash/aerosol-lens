@@ -61,6 +61,29 @@ class PlanRejectedError(Exception):
     """The model's output failed validation, even after one retry."""
 
 
+class RateLimitedError(Exception):
+    """The model provider rate-limited the request (HTTP 429).
+
+    Surfaced immediately, never retried: a 429 will not heal inside a
+    single retry loop, and burning the retry hides the real signal.
+    """
+
+
+def _is_rate_limit(exc: BaseException) -> bool:
+    """True when exc is a provider 429 (litellm.RateLimitError or equivalent).
+
+    Checks the real litellm class first, then falls back to the class name
+    (mocks, wrapped/proxied exceptions) and to a 429 status_code, which
+    litellm API errors carry.
+    """
+    rl = getattr(litellm, "RateLimitError", None)
+    if rl is not None and isinstance(exc, rl):
+        return True
+    if type(exc).__name__ == "RateLimitError":
+        return True
+    return getattr(exc, "status_code", None) == 429
+
+
 class AskRequest(BaseModel):
     question: str
     reference_date: str | None = None  # ISO date; defaults to today (UTC)
@@ -166,6 +189,8 @@ def ask(req: AskRequest) -> AskResponse:
             plan = _parse_with_agent(question, reference_date, req.user_location)
         except LLMNotConfiguredError as exc:
             raise HTTPException(status_code=501, detail=str(exc)) from exc
+        except RateLimitedError as exc:
+            raise HTTPException(status_code=429, detail=str(exc)) from exc
         except (PlanRejectedError, UnknownPlaceError, PydanticValidationError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         plan_cache.put(question, plan, scope=scope)
@@ -218,6 +243,13 @@ def _parse_with_agent(
         except (LLMNotConfiguredError, PlanRejectedError):
             raise  # not retryable: config problems and explicit refusals
         except Exception as exc:  # noqa: BLE001 -- bad JSON/schema/place/plan: retry once
+            if _is_rate_limit(exc):
+                # 429s don't heal within one retry; surface immediately
+                # as a 429 so the client can back off, instead of burning
+                # the retry and misreporting it as an invalid plan.
+                raise RateLimitedError(
+                    f"model rate limit exceeded for {model!r}: {exc}"
+                ) from exc
             last_error = exc
             messages.append(
                 {
@@ -318,15 +350,36 @@ def grid(
     t1: str,
     agg: str = "daily",
 ) -> dict:
-    """Serve a data grid slice for client-side rendering.
+    """Serve an aggregated MERRA-2 grid slice for client-side rendering.
 
-    TODO(integration): implement with kerchunk + xarray + fsspec:
-    open the reference index built by kerchunk_index.py, select
-    (variable, bbox, time), aggregate, and return a compact payload
-    (downsampled to ~screen resolution, e.g. quantized float16 or PNG).
+    Returns compact JSON: {variable, units, lats[], lons[], values[][],
+    time_start, time_end, aggregation, source}. The time window collapses
+    to a single 2D field (see backend/grid.py for the v1 semantics).
     """
-    _ = (source, variable, bbox, t0, t1, agg)
-    raise HTTPException(
-        status_code=501,
-        detail="TODO(integration): implement kerchunk/xarray grid slicing here.",
+    from .grid import (
+        BadGridRequestError,
+        GridDepsMissingError,
+        GridFetchError,
+        IndexNotBuiltError,
+        UnknownVariableError,
+        get_grid,
     )
+
+    try:
+        # target_options=None -> auto: the protected GES DISC bucket needs
+        # temporary Earthdata Login credentials via the AWS credential chain;
+        # MERRA2_S3_ANON=1 forces anonymous reads for public mirrors.
+        return get_grid(
+            source=source,
+            variable=variable,
+            bbox=bbox,
+            t0=t0,
+            t1=t1,
+            agg=agg,
+        )
+    except (GridDepsMissingError, IndexNotBuiltError) as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except (UnknownVariableError, BadGridRequestError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except GridFetchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

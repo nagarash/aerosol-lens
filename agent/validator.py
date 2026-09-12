@@ -15,13 +15,14 @@ class ValidationError(Exception):
 SURFACE_VARIABLES = {"PM25", "PM10", "O3", "NO2", "SO2", "CO"}
 
 # Variables that are column-integrated optical depths (plume-relevant).
+# True MERRA-2 tavg1_2d_aer_Nx names: extinction AOT at 550 nm.
 COLUMN_VARIABLES = {
     "TOTEXTTAU",  # total aerosol optical depth
-    "DUAOD",  # dust
-    "BCAOD",  # black carbon
-    "OCAOD",  # organic carbon
-    "SUAOD",  # sulfate
-    "SSAOD",  # sea salt
+    "DUEXTTAU",  # dust
+    "BCEXTTAU",  # black carbon
+    "OCEXTTAU",  # organic carbon
+    "SUEXTTAU",  # sulfate
+    "SSEXTTAU",  # sea salt
 }
 
 # Max sensible time window per aggregation (keeps queries interactive).
