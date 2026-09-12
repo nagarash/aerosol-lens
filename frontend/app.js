@@ -28,9 +28,11 @@ const map = new maplibregl.Map({
     sources: {
       basemap: {
         type: "raster",
-        tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
+        // CARTO started requiring an API key for basemaps; Esri's dark gray
+        // canvas is keyless. Tile order for Esri is z/y/x.
+        tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
         tileSize: 256,
-        attribution: "© OpenStreetMap contributors © CARTO",
+        attribution: "© Esri & contributors",
       },
     },
     layers: [
