@@ -7,7 +7,8 @@ COPY agent/ ./agent/
 COPY backend/requirements.txt ./backend/
 RUN pip install --no-cache-dir -r backend/requirements.txt
 
-COPY backend/app.py backend/cache.py backend/kerchunk_index.py ./backend/
+# copy the whole backend package (app.py, grid.py, earthdata_auth.py, ...)
+COPY backend/ ./backend/
 
 ENV PYTHONPATH=/srv
 EXPOSE 8000
