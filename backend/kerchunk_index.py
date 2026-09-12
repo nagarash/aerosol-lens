@@ -20,22 +20,17 @@ Collection facts (tavg1_2d_aer_Nx, M2T1NXAER):
   DUEXTTAU ~= 24*361*576*4 bytes ~= 20 MB if chunked (time, lat, lon)
 
 AUTHENTICATION (important): the bucket is *protected* — anonymous S3
-reads are rejected. Access requires an Earthdata Login account and
-temporary AWS credentials. Get them from::
-
-    https://data.gesdisc.earthdata.nasa.gov/s3credentials
-
-(authenticated with your Earthdata Login, e.g. via the `earthaccess`
-Python library or a ~/.netrc entry), then export::
-
-    AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...
-
-The builder uses the standard AWS credential chain (env vars, ~/.aws,
-IAM role) by default. Set MERRA2_S3_ANON=1 only for a genuinely public
-mirror. Credentials are short-lived (~1h); re-export before each build.
+reads are rejected. Access requires an Earthdata Login account. Set
+EARTHDATA_TOKEN to a long-lived bearer token (generate one in the
+Earthdata Login profile; server-side only, never in the repo): the
+builder exchanges it for temporary AWS session credentials
+automatically and refreshes them as needed. Alternatively export
+AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN directly
+(they last ~1h; re-export before each build). Set MERRA2_S3_ANON=1 only
+for a genuinely public mirror.
 
 Usage:
-    export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=...
+    export EARTHDATA_TOKEN=...   # or the three AWS_* vars, see above
     python kerchunk_index.py --collection tavg1_2d_aer_Nx --out ../data/kerchunk/
     python kerchunk_index.py --collection tavg1_2d_aer_Nx --out ../data/kerchunk/ --limit 3
     MERRA2_S3_PREFIX=s3://other-bucket/path python kerchunk_index.py ...
@@ -63,6 +58,11 @@ import re
 from datetime import date
 from pathlib import Path
 
+try:  # imported as part of the backend package
+    from backend.earthdata_auth import s3_target_options
+except ImportError:  # run as a script: python backend/kerchunk_index.py
+    from earthdata_auth import s3_target_options
+
 DEFAULT_COLLECTION = "tavg1_2d_aer_Nx"
 DEFAULT_SHORTNAME = "M2T1NXAER"
 # Verified 2026-09-12 via registry.opendata.aws/nasa-merra-2 and GES DISC
@@ -80,13 +80,14 @@ def _s3_prefix(prefix: str | None) -> str:
 def _s3_options() -> dict:
     """s3fs options for the MERRA-2 bucket.
 
-    Default: standard AWS credential chain (AWS_* env vars, ~/.aws,
-    IAM role) — required for the protected GES DISC bucket.
-    Set MERRA2_S3_ANON=1 only for a genuinely public mirror.
+    The builder always reads S3, so it resolves strictly via
+    backend.earthdata_auth: EARTHDATA_TOKEN exchange, the standard AWS
+    credential chain (AWS_* env vars, ~/.aws, IAM role), or
+    MERRA2_S3_ANON=1 for a genuinely public mirror. Missing credentials
+    raise an honest error naming EARTHDATA_TOKEN instead of failing
+    deep inside fsspec.
     """
-    if os.environ.get("MERRA2_S3_ANON") == "1":
-        return {"anon": True}
-    return {}
+    return s3_target_options()
 
 
 def _collection_prefix(prefix: str, shortname: str) -> str:

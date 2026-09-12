@@ -28,12 +28,15 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError as PydanticValidationError
+from starlette.responses import JSONResponse
 
 from agent.prompts import SYSTEM_PROMPT, build_user_message
 from agent.query_plan import QueryPlan, QueryPlanDraft
 from agent.validator import ValidationError, validate_plan
 
+from . import rate_limit
 from .cache import PlanCache
+from .earthdata_auth import EarthdataExchangeError, EarthdataTokenMissingError
 from .geocode import UnknownPlaceError, known_places_hint, resolve_place
 
 try:
@@ -49,6 +52,42 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class GridRateLimitMiddleware:
+    """Per-IP rate limiting for /grid: 429 + Retry-After when exceeded.
+
+    Every /grid request range-reads the protected MERRA-2 bucket against
+    the deployer's Earthdata credentials, so the quota needs guarding.
+    Pure ASGI: short-circuits before the endpoint runs. Configured via
+    GRID_RATE_LIMIT_PER_MIN (default 30 req/min/IP); see backend/rate_limit.py.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/grid"):
+            limiter = rate_limit.get_limiter()
+            ip = rate_limit.client_ip(scope)
+            if not limiter.allow(ip):
+                resp = JSONResponse(
+                    {
+                        "detail": (
+                            f"rate limit exceeded for /grid "
+                            f"({limiter.per_minute} requests per minute per "
+                            f"IP). Back off and retry."
+                        )
+                    },
+                    status_code=429,
+                    headers={"Retry-After": str(limiter.retry_after(ip))},
+                )
+                await resp(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(GridRateLimitMiddleware)
 
 plan_cache = PlanCache()
 
@@ -366,9 +405,10 @@ def grid(
     )
 
     try:
-        # target_options=None -> auto: the protected GES DISC bucket needs
-        # temporary Earthdata Login credentials via the AWS credential chain;
-        # MERRA2_S3_ANON=1 forces anonymous reads for public mirrors.
+        # target_options=None -> auto: local reference targets need no auth;
+        # remote (S3) targets resolve via backend.earthdata_auth --
+        # EARTHDATA_TOKEN exchange, the AWS credential chain, or an honest
+        # 501. MERRA2_S3_ANON=1 forces anonymous reads for public mirrors.
         return get_grid(
             source=source,
             variable=variable,
@@ -379,6 +419,10 @@ def grid(
         )
     except (GridDepsMissingError, IndexNotBuiltError) as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except EarthdataTokenMissingError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    except EarthdataExchangeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (UnknownVariableError, BadGridRequestError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GridFetchError as exc:

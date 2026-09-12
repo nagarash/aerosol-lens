@@ -74,13 +74,18 @@ verified 2026-09-12 via `https://registry.opendata.aws/nasa-merra-2/`):
 - Bucket: `s3://gesdisc-cumulus-prod-protected/MERRA2` (region us-west-2),
   layout `M2T1NXAER.5.12.4/YYYY/MM/MERRA2_400.tavg1_2d_aer_Nx.YYYYMMDD.nc4`.
 - **Authentication required**: the bucket is protected, so anonymous S3
-  reads are rejected. The builder and `/grid` use the standard AWS
-  credential chain — export temporary Earthdata Login credentials first
-  (free account at `https://urs.earthdata.nasa.gov`, then
-  `https://data.gesdisc.earthdata.nasa.gov/s3credentials`, e.g. via the
-  `earthaccess` library; set `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
-  / `AWS_SESSION_TOKEN`). Credentials last ~1h; `MERRA2_S3_ANON=1` forces
-  anonymous reads only for a genuinely public mirror.
+  reads are rejected. Set `EARTHDATA_TOKEN` (a long-lived Earthdata Login
+  bearer token — generate one in the Earthdata Login profile; **server-side
+  only**: Fly.io secrets in production, never the repo or frontend) and
+  the backend exchanges it for temporary S3 credentials automatically
+  (cached in-process, refreshed before expiry). Alternatively export
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`
+  directly (last ~1h). `MERRA2_S3_ANON=1` forces anonymous reads only for
+  a genuinely public mirror.
+- **Rate limited**: `/grid` is capped per client IP
+  (`GRID_RATE_LIMIT_PER_MIN`, default 30 requests per 60 s) with
+  `429` + `Retry-After` when exceeded — every request burns the
+  deployer's Earthdata quota, so the limit guards it.
 - Hourly, single-level NetCDF-4; one file per day, 24 steps at
   `00:30`–`23:30 UTC`; grid 576 lon × 361 lat.
 - Servable variables (550 nm aerosol extinction AOT, dimensionless):

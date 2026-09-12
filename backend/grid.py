@@ -34,6 +34,11 @@ from pathlib import Path
 
 from agent.mappings import MERRA2_COLUMN_VARIABLES, canonical_variable
 
+try:  # imported as part of the backend package
+    from backend.earthdata_auth import s3_target_options
+except ImportError:  # run as a script: python backend/grid.py
+    from earthdata_auth import s3_target_options
+
 AGGREGATIONS = ("hourly", "daily", "monthly_mean")
 MAX_NLON, MAX_NLAT = 360, 180
 
@@ -78,17 +83,34 @@ def _index_path() -> str:
     return os.environ.get("KERCHUNK_INDEX_PATH", DEFAULT_INDEX_PATH)
 
 
-def _default_target_options() -> dict:
-    """fsspec target options for opening the S3 byte ranges in references.
+def _refs_point_remote(ref_paths: list[str]) -> bool:
+    """True when any reference target is a remote URL (s3://, https://).
 
-    The GES DISC bucket is protected: default to the standard AWS
-    credential chain (AWS_* env vars, ~/.aws, IAM role) so deployments
-    can use temporary Earthdata Login credentials. Set MERRA2_S3_ANON=1
-    only for a genuinely public mirror.
+    Local reference targets (tests, local mirrors) need no S3 auth at all;
+    remote ones go through the Earthdata credential resolution.
     """
-    if os.environ.get("MERRA2_S3_ANON") == "1":
-        return {"anon": True}
-    return {}
+    for p in ref_paths:
+        with open(p) as f:
+            refs = json.load(f).get("refs", {})
+        for val in refs.values():
+            target = val[0] if isinstance(val, (list, tuple)) else val
+            if isinstance(target, str) and "://" in target:
+                if target.split("://", 1)[0] in ("s3", "http", "https"):
+                    return True
+    return False
+
+
+def _default_target_options(ref_paths: list[str]) -> dict:
+    """fsspec target options for opening the byte ranges in references.
+
+    Local reference targets need no auth ({}). Remote targets resolve via
+    backend.earthdata_auth: MERRA2_S3_ANON=1 -> anonymous, EARTHDATA_TOKEN
+    -> exchanged session credentials, AWS_* in env -> standard AWS chain,
+    otherwise an honest 501 naming EARTHDATA_TOKEN.
+    """
+    if not _refs_point_remote(ref_paths):
+        return {}
+    return s3_target_options()
 
 
 def _require_geo_deps() -> None:
@@ -366,13 +388,11 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
 
     Raises GridError subclasses; app.py maps them to HTTP statuses.
     `target_options` is passed to fsspec for remote targets; None (default)
-    means "auto": anonymous only if MERRA2_S3_ANON=1, otherwise the standard
-    AWS credential chain (temporary Earthdata Login credentials for the
-    protected GES DISC bucket). Tests use local files ({} is safe there).
+    means "auto": local reference targets need no auth, remote ones resolve
+    via backend.earthdata_auth (EARTHDATA_TOKEN exchange, AWS chain, or an
+    honest 501). Tests use local files ({} is safe there).
     """
     _require_geo_deps()
-    if target_options is None:
-        target_options = _default_target_options()
     var = _check_args(source, variable, agg)
     w, s, e, n = _parse_bbox(bbox)
     start, end = _parse_time(t0, "t0"), _parse_time(t1, "t1")
@@ -380,6 +400,8 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
         raise BadGridRequestError("t1 must be >= t0.")
     manifest = _load_manifest(_index_path())
     ref_paths = _refs_for_window(manifest, start, end)
+    if target_options is None:
+        target_options = _default_target_options(ref_paths)
 
     try:
         ds = _open_dataset(ref_paths, target_options=target_options)

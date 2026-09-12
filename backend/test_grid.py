@@ -282,6 +282,59 @@ def test_no_coverage_window_is_422():
     raise AssertionError("expected BadGridRequestError for uncovered window")
 
 
+def test_remote_refs_require_earthdata_credentials():
+    """Refs pointing at s3:// with no creds -> EarthdataTokenMissingError.
+
+    Proves the auth check fires BEFORE any network access: local refs
+    (all other tests) need no credentials, remote refs fail honestly
+    naming EARTHDATA_TOKEN instead of dying inside fsspec.
+    """
+    require_geo()
+    from backend.earthdata_auth import EarthdataTokenMissingError, reset_cache
+
+    tmp = tempfile.mkdtemp(prefix="gridauth-")
+    saved = {
+        k: os.environ.get(k)
+        for k in (
+            "KERCHUNK_INDEX_PATH", "EARTHDATA_TOKEN", "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "MERRA2_S3_ANON",
+        )
+    }
+    try:
+        ref_path = os.path.join(tmp, "remote.json")
+        with open(ref_path, "w") as f:
+            json.dump(
+                {"version": 1,
+                 "refs": {"DUEXTTAU/.zarray": ["s3://bucket/file.nc4", 0, 100]}},
+                f,
+            )
+        manifest_path = os.path.join(tmp, "index.json")
+        with open(manifest_path, "w") as f:
+            json.dump({"files": {"2026-09-01": "remote.json"}}, f)
+        os.environ["KERCHUNK_INDEX_PATH"] = manifest_path
+        for k in saved:
+            if k != "KERCHUNK_INDEX_PATH":
+                os.environ.pop(k, None)
+        grid_module._load_manifest.cache_clear()
+        reset_cache()
+        try:
+            get_grid("merra2", "DUEXTTAU", "0,0,10,10",
+                     "2026-09-01T00:00:00Z", "2026-09-01T23:59:59Z")
+        except EarthdataTokenMissingError as exc:
+            assert "EARTHDATA_TOKEN" in str(exc), str(exc)
+            return
+        raise AssertionError("expected EarthdataTokenMissingError")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        grid_module._load_manifest.cache_clear()
+        reset_cache()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_missing_index_is_501_naming_env_var():
     require_geo()
     saved = os.environ.get("KERCHUNK_INDEX_PATH")
