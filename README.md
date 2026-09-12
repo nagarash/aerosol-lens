@@ -131,6 +131,58 @@ Notes and limitations:
   concatenated along lon (`[w..180] + [-180..e]`); `lons[]` wraps
   accordingly. Split the request yourself if you need monotonic lons.
 
+## Frontend
+
+Static single-page app (MapLibre GL JS via CDN — no build step, no npm).
+Ask a question in the chat box; the app POSTs to `/ask`, then renders the
+returned plan:
+
+- **Air quality** (`level=surface`): Google Air Quality API heatmap tiles
+  (`UAQI_RED_GREEN`), fetched **directly from the browser** with your own
+  key. Click the ⚙ gear to store the key — it lives in `localStorage`
+  only and is never sent to our backend. Get a key at Google Cloud
+  Console (enable the *Air Quality API*). Without a key you get a
+  friendly empty state, not a broken map.
+- **Plume view** (`level=column`): the plan's `/grid` URL is fetched from
+  the backend, mapped through a colormap onto an offscreen canvas
+  (NaN/missing → transparent), and added as a MapLibre `image` source fit
+  to the grid bounds. The colorbar legend is **data-driven**: gradient +
+  min/mid/max labels from the fetched values (p2/p98 normalization so
+  hot-pixel outliers don't crush the ramp), with units, variable name,
+  and time range. Colormaps: yellow-orange-red `dust` ramp for `DU*`
+  (dust AOD), viridis-like default otherwise.
+- The mode toggle follows the plan: if a plan's level disagrees with the
+  current toggle, the UI auto-switches with a one-line notice. Surface
+  and column data are never rendered together.
+- Backend errors surface plainly in the error banner (422/501/502
+  messages, 429 with `Retry-After`), never as stack traces.
+
+Pure rendering logic (colormaps, normalization, grid→pixel buffer) lives
+in `frontend/js/grid-render.js`, written DOM-free and covered by
+`node frontend/js/grid-render.test.js`.
+
+### Running locally
+
+```bash
+cd frontend && python3 -m http.server 8080
+# then open http://localhost:8080
+```
+
+Point the app at your backend in `frontend/config.js`:
+
+```js
+window.AEROSOL_LENS_CONFIG = { BACKEND_URL: "http://localhost:8000" };
+```
+
+### Deploying to Cloudflare Pages
+
+1. Set `BACKEND_URL` in `frontend/config.js` to your deployed backend
+   (e.g. `https://<your-app>.fly.dev`).
+2. Push the repo (or just `frontend/`) to Pages — `index.html` at the
+   root of the published directory is the entry point.
+3. No environment variables or build command needed on Pages; the only
+   per-user secret (the Google key) is entered in the browser UI.
+
 ## Repo layout
 
 | Path | What |
@@ -145,9 +197,12 @@ Notes and limitations:
 Scaffold (v0.1): the full skeleton boots and the contracts are real, but
 some integrations are still stubs — see the TODO list in `README` issues /
 code comments marked `TODO(integration)`. Implemented so far: the LiteLLM
-parse step, the kerchunk index builder (`backend/kerchunk_index.py`), and
-the `/grid` slicer (`backend/grid.py`, synthetic-tested; one live AWS
-range-read still pending). Still stubbed: the CAMS fetcher.
+parse step, the kerchunk index builder (`backend/kerchunk_index.py`), the
+`/grid` slicer (`backend/grid.py`, synthetic-tested; one live AWS
+range-read still pending), Earthdata token auth + `/grid` rate limiting,
+and the frontend grid renderer (plume canvas overlay with data-driven
+colorbar, Google heatmap tiles with bring-your-own-key settings).
+Still stubbed: the CAMS fetcher, time-frame prefetching, OpenAQ overlay.
 
 ## License
 

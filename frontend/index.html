@@ -16,15 +16,49 @@
     <button data-mode="plume">Plume view</button>
   </div>
 
-  <!-- Legend: units + colorbar + thresholds. Non-negotiable for trust. -->
+  <!-- Settings: bring-your-own Google Air Quality API key (localStorage only) -->
+  <button id="settings-btn" class="panel" title="Settings">⚙</button>
+  <div id="settings" class="panel hidden">
+    <div class="settings-head">
+      <strong>Settings</strong>
+      <button id="settings-close" title="Close">✕</button>
+    </div>
+    <label for="settings-key">Google Air Quality API key</label>
+    <input id="settings-key" type="password" autocomplete="off"
+           placeholder="Paste your key" />
+    <div class="settings-row">
+      <button id="settings-save">Save</button>
+      <button id="settings-clear">Clear</button>
+    </div>
+    <p class="settings-note">
+      The key stays in this browser and is only ever sent to Google.
+      Get one at
+      <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>
+      (enable the <em>Air Quality API</em>).
+    </p>
+  </div>
+
+  <!-- Backend / grid errors, in plain language -->
+  <div id="error-banner" class="hidden"></div>
+
+  <!-- Loading indicator for ask + (cold) grid fetches -->
+  <div id="loading" class="hidden">
+    <div class="spinner"></div>
+    <span id="loading-label">Loading…</span>
+  </div>
+
+  <!-- Legend: data-driven colorbar for plume grids, US-AQI scale for live air quality -->
   <div id="legend" class="panel">
-    <div id="legend-title">PM2.5</div>
+    <div id="legend-title">Aerosol Lens</div>
     <div id="legend-bar"></div>
-    <div id="legend-labels"><span id="legend-min"></span><span id="legend-units"></span><span id="legend-max"></span></div>
+    <div id="legend-labels">
+      <span id="legend-min"></span><span id="legend-mid"></span><span id="legend-max"></span>
+    </div>
+    <div id="legend-meta"></div>
     <div id="legend-guideline"></div>
   </div>
 
-  <!-- Time scrubber + play (stub: wired to frame prefetching later) -->
+  <!-- Time scrubber (stub: wired to frame prefetching later) -->
   <div id="timebar" class="panel">
     <button id="play-btn" title="Play animation">▶</button>
     <input id="time-slider" type="range" min="0" max="0" value="0" />
@@ -43,6 +77,8 @@
   </div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="config.js"></script>
+  <script src="js/grid-render.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

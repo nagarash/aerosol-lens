@@ -1,28 +1,31 @@
 /* Aerosol Lens frontend.
  *
  * Data flow:
- *   1. Chat input -> POST /ask -> {plan, data_url, legend}
- *   2. data_url "google://..."  -> raster layer calling the Google Air
- *      Quality API heatmap tiles DIRECTLY from the browser with the user's
- *      own key (never proxied through our backend).
- *   3. data_url "/grid?..."     -> fetch grid JSON from our backend and
- *      render client-side (TODO: pick deck.gl heatmap or canvas rendering).
- *   4. Mode toggle switches Air quality (surface) <-> Plume view (column);
- *      the two are NEVER blended in one layer (validator enforces this
- *      server-side too).
+ *   1. Chat input -> POST {BACKEND_URL}/ask -> {plan, data_url, legend, cached}
+ *   2. plan.level === 'surface' -> Air quality mode: Google Air Quality API
+ *      heatmap tiles called DIRECTLY from the browser with the user's own
+ *      key (bring-your-own-key; the backend never sees it).
+ *   3. plan.level === 'column'  -> Plume mode: fetch the plan's /grid URL,
+ *      render the 2D field client-side through a colormap onto an offscreen
+ *      canvas, add it as a MapLibre `image` source.
+ *   4. The mode toggle follows the plan: if the plan's level disagrees with
+ *      the current toggle, the UI auto-switches with a one-line notice.
+ *      Surface and column data are NEVER rendered together.
  */
 
-const BACKEND = ""; // same origin in docker-compose; override for dev
-const GOOGLE_AQ_API_KEY = localStorage.getItem("google_aq_key") || "";
-// TODO(ux): add a settings affordance to store the user's Google API key
-// (bring-your-own-key). Without it, live/forecast views are disabled.
+const BACKEND_URL = (
+  (window.AEROSOL_LENS_CONFIG && window.AEROSOL_LENS_CONFIG.BACKEND_URL) ||
+  "http://localhost:8000"
+).replace(/\/+$/, "");
+
+const GOOGLE_KEY_STORAGE = "google_aq_key";
+const GOOGLE_MAPTYPE = "UAQI_RED_GREEN"; // Google's red-green US-AQI heatmap
 
 const map = new maplibregl.Map({
   container: "map",
   style: {
     version: 8,
     sources: {
-      // Dark, muted basemap so the data is the hero. Free CARTO tiles.
       basemap: {
         type: "raster",
         tiles: ["https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"],
@@ -30,7 +33,14 @@ const map = new maplibregl.Map({
         attribution: "© OpenStreetMap contributors © CARTO",
       },
     },
-    layers: [{ id: "basemap", type: "raster", source: "basemap", paint: { "raster-opacity": 0.9 } }],
+    layers: [
+      {
+        id: "basemap",
+        type: "raster",
+        source: "basemap",
+        paint: { "raster-opacity": 0.9 },
+      },
+    ],
   },
   center: [0, 20],
   zoom: 2,
@@ -40,113 +50,311 @@ map.addControl(new maplibregl.NavigationControl(), "top-right");
 
 let currentMode = "health"; // 'health' (surface) | 'plume' (column)
 
+// ---------------------------------------------------------------------------
+// Small UI helpers
+
+const $ = (id) => document.getElementById(id);
+
+function log(msg) {
+  const div = document.createElement("div");
+  div.textContent = msg;
+  const logEl = $("chat-log");
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function showLoading(on, label) {
+  const el = $("loading");
+  el.classList.toggle("hidden", !on);
+  if (label) $("loading-label").textContent = label;
+}
+
+function showError(message) {
+  const el = $("error-banner");
+  el.textContent = message;
+  el.classList.remove("hidden");
+}
+
+function hideError() {
+  $("error-banner").classList.add("hidden");
+}
+
+/** Build a plain-language Error from a failed backend response. */
+async function httpError(res, what) {
+  let detail = "";
+  let retryAfter = "";
+  try {
+    const body = await res.json();
+    detail = body.detail || body.message || "";
+  } catch (_) {
+    /* non-JSON error body */
+  }
+  if (res.status === 429) {
+    retryAfter = res.headers.get("Retry-After");
+    detail =
+      detail ||
+      `Rate limited${retryAfter ? ` — retry in ${retryAfter}s` : ""}. ` +
+        "The backend throttles grid requests to protect its data quota.";
+  }
+  const msg = detail ? `${what}: ${detail}` : `${what}: HTTP ${res.status}`;
+  const err = new Error(res.status === 429 ? `Rate limited. ${detail}` : msg);
+  err.status = res.status;
+  return err;
+}
+
+// ---------------------------------------------------------------------------
+// Mode toggle: follows the plan, never mixes surface + column.
+
+function setMode(mode, reason) {
+  currentMode = mode;
+  document.querySelectorAll("#mode-toggle button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.mode === mode)
+  );
+  if (reason) log(reason);
+}
+
+function modeForPlan(plan) {
+  return plan.level === "surface" ? "health" : "plume";
+}
+
 document.querySelectorAll("#mode-toggle button").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll("#mode-toggle button").forEach((b) => b.classList.remove("active"));
-    btn.classList.add("active");
-    currentMode = btn.dataset.mode;
-    log(`Mode: ${currentMode === "health" ? "Air quality (surface)" : "Plume view (column)"}. Ask a question to load data.`);
-    // TODO: re-issue the last question with the flipped intent when a plan exists.
+    setMode(
+      btn.dataset.mode,
+      `Mode: ${btn.dataset.mode === "health" ? "Air quality (surface)" : "Plume view (column)"}. Ask a question to load data.`
+    );
+    clearDataLayer();
   });
 });
 
-document.getElementById("chat-form").addEventListener("submit", async (e) => {
+// ---------------------------------------------------------------------------
+// Ask flow
+
+$("chat-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const input = document.getElementById("chat-input");
+  const input = $("chat-input");
   const question = input.value.trim();
   if (!question) return;
   input.value = "";
+  hideError();
   log(`You: ${question}`);
-  log("Thinking…");
+  showLoading(true, "Asking the model…");
   try {
-    const res = await fetch(`${BACKEND}/ask`, {
+    const res = await fetch(`${BACKEND_URL}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ question }),
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      log(`Error: ${err.detail || res.statusText}`);
-      return;
-    }
+    if (!res.ok) throw await httpError(res, "Couldn't understand that question");
     const { plan, data_url, legend, cached } = await res.json();
-    log(`Plan: ${plan.intent} / ${plan.level} / ${plan.variable} ${cached ? "(cached)" : ""}`);
-    document.getElementById("chat-caption").textContent = plan.caption || "";
-    renderLegend(plan, legend);
-    await renderData(plan, data_url);
-    map.fitBounds(
-      [[plan.bbox[0], plan.bbox[1]], [plan.bbox[2], plan.bbox[3]]],
-      { padding: 40 }
+
+    const wantMode = modeForPlan(plan);
+    if (wantMode !== currentMode) {
+      setMode(
+        wantMode,
+        `Switched to ${wantMode === "health" ? "Air quality" : "Plume view"} — this plan is ${plan.level}-level data.`
+      );
+    }
+    log(
+      `Plan: ${plan.intent} / ${plan.level} / ${plan.variable}${cached ? " (cached)" : ""}`
     );
+    $("chat-caption").textContent = plan.caption || "";
+    await renderData(plan, data_url, legend);
     setupTimeScrubber(plan);
   } catch (err) {
+    // Plain backend errors, never stack traces.
+    showError(err.message || "Something went wrong. Please try again.");
     log(`Error: ${err.message}`);
+  } finally {
+    showLoading(false);
   }
 });
 
-async function renderData(plan, data_url) {
-  // Remove the previous overlay; one view at a time, never blended.
-  for (const id of ["aerosol-layer", "aerosol-source"]) {
+// ---------------------------------------------------------------------------
+// Rendering: exactly one data layer at a time.
+
+function clearDataLayer() {
+  for (const id of ["data-layer", "data-source"]) {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
   }
+}
 
+async function renderData(plan, data_url, legend) {
+  clearDataLayer();
   if (data_url.startsWith("google://")) {
-    if (!GOOGLE_AQ_API_KEY) {
-      log("Live view needs a Google Air Quality API key (bring-your-own-key). TODO: settings UI.");
-      return;
-    }
-    // Google heatmap tiles, called directly from the browser.
-    const template = data_url.replace("google://", "https://airquality.googleapis.com/v1/");
-    map.addSource("aerosol-source", {
-      type: "raster",
-      tiles: [`${template}?key=${GOOGLE_AQ_API_KEY}`],
-      tileSize: 256,
-    });
-    map.addLayer({
-      id: "aerosol-layer",
-      type: "raster",
-      source: "aerosol-source",
-      paint: { "raster-opacity": plan.style.opacity ?? 0.65 },
-    });
+    renderAirQuality(plan, data_url);
   } else if (data_url.startsWith("/grid")) {
-    // TODO(rendering): fetch the grid JSON and render client-side
-    // (deck.gl HeatmapLayer or a canvas/WebGL shader with the colormap
-    // applied in-shader for instant restyling).
-    log(`Grid rendering not yet implemented for ${plan.variable} (${plan.source}).`);
+    await renderPlume(plan, data_url);
+  } else if (data_url.startsWith("cams://")) {
+    log("Historical surface data (CAMS) isn't wired up yet — try a live air-quality question or a plume query.");
   } else {
-    log(`No renderer for data_url: ${data_url}`);
+    showError(`No renderer for this data source (${plan.source}).`);
   }
 }
 
-function renderLegend(plan, legend) {
-  // TODO: build a real colorbar from data/colormaps.json stops keyed by
-  // legend.stops, with labeled thresholds and the WHO guideline line for
-  // exceedance mode.
-  document.getElementById("legend-title").textContent = plan.variable;
-  document.getElementById("legend-units").textContent = legend.units || "";
-  document.getElementById("legend-guideline").textContent =
-    plan.style.mode === "exceedance" ? `Guideline: ${legend.guideline || "WHO 24h"}` : "";
-  const bar = document.getElementById("legend-bar");
-  bar.style.background =
-    plan.level === "surface"
-      ? "linear-gradient(to right,#00e400,#ffff00,#ff7e00,#ff0000,#8f3f97,#7e0023)"
-      : "linear-gradient(to right,#ffffcc,#fed976,#fd8d3c,#e31a1c,#800026)";
+// --- Air quality: Google heatmap tiles, key stays in the browser. ----------
+
+function googleTileTemplate(data_url) {
+  let template = data_url.replace(
+    "google://",
+    "https://airquality.googleapis.com/v1/"
+  );
+  if (!template.includes("mapTypes/")) {
+    template = template.replace(
+      "/heatmapTiles/",
+      `/mapTypes/${GOOGLE_MAPTYPE}/heatmapTiles/`
+    );
+  }
+  return template;
 }
+
+function renderAirQuality(plan, data_url) {
+  const key = localStorage.getItem(GOOGLE_KEY_STORAGE) || "";
+  if (!key) {
+    // Friendly empty state: no key, no layer, settings opened for them.
+    log("Live air-quality view needs a Google Air Quality API key (bring-your-own-key). Add it in Settings — it stays in this browser.");
+    openSettings();
+    renderSurfaceLegendEmpty();
+    return;
+  }
+  const template = googleTileTemplate(data_url);
+  map.addSource("data-source", {
+    type: "raster",
+    tiles: [`${template}?key=${encodeURIComponent(key)}`],
+    tileSize: 256,
+    attribution: "Air quality: Google Air Quality API",
+  });
+  map.addLayer({
+    id: "data-layer",
+    type: "raster",
+    source: "data-source",
+    paint: { "raster-opacity": plan.style?.opacity ?? 0.65 },
+  });
+  map.fitBounds(
+    [
+      [plan.bbox[0], plan.bbox[1]],
+      [plan.bbox[2], plan.bbox[3]],
+    ],
+    { padding: 40 }
+  );
+  renderSurfaceLegend(plan);
+}
+
+function renderSurfaceLegend(plan) {
+  // Google's UAQI_RED_GREEN tiles use the US AQI color scale; the bar is
+  // fixed because the tile colors are fixed server-side.
+  $("legend-title").textContent = "Air quality (US AQI)";
+  $("legend-bar").style.background =
+    "linear-gradient(to right,#00e400,#ffff00,#ff7e00,#ff0000,#8f3f97,#7e0023)";
+  $("legend-min").textContent = "Good";
+  $("legend-mid").textContent = "";
+  $("legend-max").textContent = "Hazardous";
+  $("legend-meta").textContent = "Live heatmap · Google Air Quality API";
+  $("legend-guideline").textContent =
+    plan.style?.mode === "exceedance" ? "Guideline: WHO 24h PM2.5" : "";
+}
+
+function renderSurfaceLegendEmpty() {
+  $("legend-title").textContent = "Air quality";
+  $("legend-bar").style.background = "#333";
+  $("legend-min").textContent = "";
+  $("legend-mid").textContent = "no API key";
+  $("legend-max").textContent = "";
+  $("legend-meta").textContent = "Add a key in Settings (⚙)";
+  $("legend-guideline").textContent = "";
+}
+
+// --- Plume: /grid JSON -> colormap -> canvas -> MapLibre image source. -----
+
+async function renderPlume(plan, data_url) {
+  showLoading(true, "Fetching grid data…");
+  try {
+    const res = await fetch(`${BACKEND_URL}${data_url}`);
+    if (!res.ok) throw await httpError(res, "Grid request failed");
+    const grid = await res.json();
+    const buf = GridRender.gridToPixelBuffer(grid);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = buf.width;
+    canvas.height = buf.height;
+    const ctx = canvas.getContext("2d");
+    ctx.putImageData(new ImageData(buf.data, buf.width, buf.height), 0, 0);
+
+    map.addSource("data-source", {
+      type: "image",
+      url: canvas.toDataURL(),
+      coordinates: GridRender.gridCorners(grid),
+    });
+    map.addLayer({
+      id: "data-layer",
+      type: "raster",
+      source: "data-source",
+      paint: { "raster-opacity": 0.9, "raster-fade-duration": 0 },
+    });
+    map.fitBounds(GridRender.gridBounds(grid), { padding: 40 });
+    renderPlumeLegend(grid, buf);
+  } finally {
+    showLoading(false);
+  }
+}
+
+function renderPlumeLegend(grid, buf) {
+  // Real colorbar: gradient + min/mid/max from the fetched data, never
+  // hardcoded.
+  $("legend-title").textContent = GridRender.prettyVariable(grid.variable);
+  $("legend-bar").style.background = GridRender.legendGradient(buf.colormap);
+  $("legend-min").textContent = GridRender.formatTick(buf.vmin);
+  $("legend-mid").textContent = GridRender.formatTick(buf.vmid);
+  $("legend-max").textContent = GridRender.formatTick(buf.vmax);
+  const t0 = String(grid.time_start || "").slice(0, 10);
+  const t1 = String(grid.time_end || "").slice(0, 10);
+  $("legend-meta").textContent =
+    `${grid.units || ""} · ${t0}${t1 && t1 !== t0 ? " → " + t1 : ""}` +
+    `${grid.aggregation ? " · " + grid.aggregation : ""}`;
+  $("legend-guideline").textContent = "";
+}
+
+// ---------------------------------------------------------------------------
+// Settings: Google API key (bring-your-own-key, localStorage only).
+
+function openSettings() {
+  $("settings-key").value = localStorage.getItem(GOOGLE_KEY_STORAGE) || "";
+  $("settings").classList.remove("hidden");
+}
+
+function closeSettings() {
+  $("settings").classList.add("hidden");
+}
+
+$("settings-btn").addEventListener("click", () => {
+  $("settings").classList.toggle("hidden");
+  if (!$("settings").classList.contains("hidden")) openSettings();
+});
+$("settings-close").addEventListener("click", closeSettings);
+$("settings-save").addEventListener("click", () => {
+  const key = $("settings-key").value.trim();
+  if (key) {
+    localStorage.setItem(GOOGLE_KEY_STORAGE, key);
+    log("Google API key saved — it stays in this browser and is only sent to Google.");
+  } else {
+    localStorage.removeItem(GOOGLE_KEY_STORAGE);
+    log("Google API key removed.");
+  }
+  closeSettings();
+});
+$("settings-clear").addEventListener("click", () => {
+  localStorage.removeItem(GOOGLE_KEY_STORAGE);
+  $("settings-key").value = "";
+  log("Google API key removed.");
+});
+
+// ---------------------------------------------------------------------------
+// Time scrubber (stub: per-frame prefetching is a later increment).
 
 function setupTimeScrubber(plan) {
-  // TODO(animation): expand plan.time_start..time_end into frames at
-  // plan.aggregation steps, prefetch the next N frames while the current
-  // one displays, crossfade on advance.
-  const label = document.getElementById("time-label");
-  label.textContent = `${plan.time_start.slice(0, 10)} → ${plan.time_end.slice(0, 10)}`;
-  document.getElementById("play-btn").onclick = () => log("Animation not yet implemented.");
+  $("time-label").textContent = `${String(plan.time_start).slice(0, 10)} → ${String(plan.time_end).slice(0, 10)}`;
+  $("play-btn").onclick = () => log("Animation not yet implemented.");
 }
 
-function log(msg) {
-  const el = document.getElementById("chat-log");
-  const div = document.createElement("div");
-  div.textContent = msg;
-  el.appendChild(div);
-  el.scrollTop = el.scrollHeight;
-}
+log("Ask about air quality or aerosol plumes — e.g. “Is it safe to run in Delhi today?”");

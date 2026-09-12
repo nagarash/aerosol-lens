@@ -382,7 +382,12 @@ def to_grid_json(da, variable: str, t0: datetime, t1: datetime,
     lats = [round(float(v), 4) for v in da["lat"].values]
     lons = [round(float(v), 4) for v in da["lon"].values]
     values = np.asarray(da.values, dtype=float)
-    values = np.round(values, 4).tolist()
+    # NaN is not valid JSON (browsers reject it outright); missing cells
+    # go out as null, which the frontend renders transparent.
+    values = [
+        [None if (isinstance(v, float) and np.isnan(v)) else round(v, 4) for v in row]
+        for row in values.tolist()
+    ]
     return {
         "variable": variable,
         "units": "dimensionless",  # aerosol optical thickness at 550 nm

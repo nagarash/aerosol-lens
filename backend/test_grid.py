@@ -504,6 +504,25 @@ def test_to_grid_json_sorts_descending_lat():
     assert payload["values"] == [[2.0], [1.0]], "values must follow the lat sort"
 
 
+def test_to_grid_json_nan_becomes_null_not_nan_literal():
+    # NaN is not valid JSON (browsers reject it); missing cells must go
+    # out as null so the frontend can render them transparent.
+    require_geo()
+    da = xr.DataArray(
+        np.array([[0.5, np.nan], [np.nan, 1.5]]),
+        dims=("lat", "lon"),
+        coords={"lat": [10.0, 20.0], "lon": [30.0, 40.0]},
+    )
+    from datetime import datetime, timezone
+    import json
+
+    t0 = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    payload = to_grid_json(da, "DUEXTTAU", t0, t0, "hourly", False, 1)
+    assert payload["values"] == [[0.5, None], [None, 1.5]]
+    # Round-trip through strict JSON: must not raise, must not contain NaN.
+    assert json.loads(json.dumps(payload))["values"] == [[0.5, None], [None, 1.5]]
+
+
 def test_kerchunk_index_helpers():
     assert kerchunk_index.date_of_filename(
         "s3://bucket/MERRA2_400.tavg1_2d_aer_Nx.20240115.nc4"
