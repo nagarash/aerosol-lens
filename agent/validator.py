@@ -33,6 +33,7 @@ def validate_plan(plan: QueryPlan) -> QueryPlan:
     """Validate a QueryPlan, raising ValidationError on any violation."""
     _check_health_guardrail(plan)
     _check_level_variable_consistency(plan)
+    _check_source_level_consistency(plan)
     _check_single_view(plan)
     _check_time_window(plan)
     return plan
@@ -66,6 +67,37 @@ def _check_level_variable_consistency(plan: QueryPlan) -> None:
     if plan.level == "column" and plan.variable in SURFACE_VARIABLES:
         raise ValidationError(
             f"level='column' is inconsistent with surface variable {plan.variable!r}."
+        )
+
+
+def _check_source_level_consistency(plan: QueryPlan) -> None:
+    """GUARDRAIL: the source must be able to serve the plan's level.
+
+    - google = Google Air Quality API, surface PM2.5 only (frontend calls it
+      directly). It has no column/AOD data of any kind.
+    - merra2 = MERRA-2 reanalysis, column AOD only (speciated aerosols).
+    - cams = CAMS EAC4 reanalysis, historical surface PM2.5/PM10 only.
+    A plume/column question about "today" must still use merra2 -- recency
+    never overrides the level.
+    """
+    if plan.source == "google":
+        if plan.level != "surface":
+            raise ValidationError(
+                f"source='google' serves surface data only, got level={plan.level!r}. "
+                "Column/plume questions must use source='merra2'."
+            )
+        if plan.variable != "PM25":
+            raise ValidationError(
+                f"source='google' serves PM2.5 only, got variable={plan.variable!r}."
+            )
+    if plan.source == "merra2" and plan.level != "column":
+        raise ValidationError(
+            f"source='merra2' serves column AOD only, got level={plan.level!r}. "
+            "Surface questions must use source='google' (recent) or 'cams' (historical)."
+        )
+    if plan.source == "cams" and plan.level != "surface":
+        raise ValidationError(
+            f"source='cams' serves surface PM2.5/PM10 only, got level={plan.level!r}."
         )
 
 

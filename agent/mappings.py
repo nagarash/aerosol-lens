@@ -70,16 +70,18 @@ INTENT_DEFAULTS: dict[str, IntentDefaults] = {
     "comparison": {"level": "surface", "source": "cams", "aggregation": "daily"},
 }
 
-# Time-based source routing. The agent applies these BEFORE emitting a plan:
-# - "now", "today", "forecast", or anything within the last 30 days -> google
-#   (live/forecast/history; frontend calls the API directly)
-# - older than 30 days AND surface-level -> cams (EAC4 reanalysis)
-# - older than 30 days AND column/speciated -> merra2
-# - "what kind of aerosol" (dust vs smoke vs sulfate) -> merra2 regardless
+# Time-based source routing. The agent applies these BEFORE emitting a plan.
+# LEVEL DECIDES FIRST -- recency never overrides it:
+# - level='column' (plume tracking, or "what kind of aerosol"): source='merra2',
+#   ALWAYS, even for "today". Google has no column/AOD data.
+# - level='surface' and the question is about now, today, the coming days, or
+#   the last 30 days: source='google' (live/forecast/history PM2.5; the
+#   frontend calls the API directly).
+# - level='surface' and older than 30 days: source='cams' (EAC4 reanalysis).
 SOURCE_TIME_RULES = """
-- If the question is about now, today, the coming days, or the last 30 days: source='google'.
-- Else if level='surface': source='cams' (historical surface PM2.5/PM10).
-- Else (level='column', or the question asks what KIND of aerosol): source='merra2'.
+- If level='column' (plume, or the question asks what KIND of aerosol -- dust vs smoke vs sulfate): source='merra2', regardless of date. Google has no column data.
+- Else if the question is about now, today, the coming days, or the last 30 days: source='google'.
+- Else (surface, older than 30 days): source='cams' (historical surface PM2.5/PM10).
 """
 
 # WHO guideline values (ug/m^3) used by the 'exceedance' view mode.
