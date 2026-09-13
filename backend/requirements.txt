@@ -4,8 +4,22 @@ pydantic>=2.0
 litellm>=1.50
 xarray>=2024.1
 fsspec>=2024.1
-kerchunk>=0.2
 h5netcdf>=1.2
 h5py>=3.8
 s3fs>=2024.1
 dask>=2024.1
+
+# Granules are read over HTTPS (see backend/earthdata_auth.py), which means
+# fsspec needs its async HTTP backend. It arrives transitively via s3fs
+# today; pin it explicitly because the grid path now depends on it directly.
+aiohttp>=3.9
+
+# PINNED DELIBERATELY -- do not "simplify" these two.
+# kerchunk >=0.2.8 imports zarr.core.* and cannot run on zarr 2 at all;
+# kerchunk 0.2.7 (the last zarr-2 release) is too old for this h5py and
+# silently emits references containing only coordinate arrays -- no data
+# variables -- so the index looks built but every /grid read finds nothing.
+# zarr 3 in turn requires the reference filesystem to be opened with
+# asynchronous=True (see backend/grid.py::_open_dataset).
+kerchunk>=0.2.8
+zarr>=3.0.1

@@ -6,6 +6,23 @@ primary_region = "sjc"
 [build]
   dockerfile = "backend/Dockerfile"
 
+[env]
+  # The kerchunk index lives on the attached volume, not in the image: it is
+  # derived data (~3 MB per indexed day) that must survive redeploys and grow
+  # incrementally as new MERRA-2 granules are published.
+  KERCHUNK_INDEX_PATH = "/data/kerchunk/index.json"
+  # Granules are read over HTTPS. Direct S3 is in-region-only (AWS us-west-2);
+  # from Fly every S3 GetObject returns 403 despite valid credentials.
+  MERRA2_ACCESS = "https"
+  # Agent parse step. OpenRouter's ":free" tier; this model is one of the few
+  # free ones advertising response_format support, which agent/prompts.py
+  # requires (it asks for a JSON object). Needs the OPENROUTER_API_KEY secret.
+  LITELLM_MODEL = "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+
+[mounts]
+  source = "kerchunk_data"
+  destination = "/data"
+
 [http_service]
   internal_port = 8000
   force_https = true

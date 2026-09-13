@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -350,13 +351,22 @@ def _data_url_for(plan: QueryPlan) -> str:
         return "google://heatmapTiles/{z}/{x}/{y}"
     if plan.source == "merra2":
         w, s, e, n = plan.bbox
-        return (
-            "/grid?source=merra2"
-            f"&variable={plan.variable}"
-            f"&bbox={w},{s},{e},{n}"
-            f"&t0={plan.time_start.isoformat()}&t1={plan.time_end.isoformat()}"
-            f"&agg={plan.aggregation}"
-        )
+        # Build via urlencode, not an f-string: time_start/end are UTC-aware
+        # datetimes, and .isoformat() renders the offset as "+00:00". An
+        # un-encoded "+" in a query string decodes to a space on the server
+        # (application/x-www-form-urlencoded convention), which every
+        # client -- curl, fetch(), anything -- reproduces by sending the "+"
+        # verbatim; the frontend fetches this URL as-is (frontend/app.js
+        # renderPlume), so an unencoded query broke every real request.
+        query = urlencode({
+            "source": "merra2",
+            "variable": plan.variable,
+            "bbox": f"{w},{s},{e},{n}",
+            "t0": plan.time_start.isoformat(),
+            "t1": plan.time_end.isoformat(),
+            "agg": plan.aggregation,
+        })
+        return f"/grid?{query}"
     if plan.source == "cams":
         # TODO(integration): implement the CAMS fetcher, then return its URL.
         return "cams://pending"

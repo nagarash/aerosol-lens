@@ -192,3 +192,47 @@ def s3_target_options() -> dict:
         "AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN, or set "
         "MERRA2_S3_ANON=1 for a public mirror."
     )
+
+
+# --------------------------------------------------------------------------
+# HTTPS access (portable; works outside AWS us-west-2)
+
+DATA_HTTPS_BASE = "https://data.gesdisc.earthdata.nasa.gov/data"
+
+
+def https_target_options() -> dict:
+    """fsspec options for HTTPS range reads of the protected MERRA-2 archive.
+
+    Why this exists: GES DISC grants *direct S3* access only to callers
+    running inside AWS us-west-2. From anywhere else (Fly.io, a laptop)
+    the exchanged session credentials are valid but every GetObject comes
+    back 403 Forbidden -- the denial is by request origin, not by token.
+    The HTTPS archive endpoint accepts the Earthdata bearer token directly
+    and serves ranged reads from any network, so it is the portable path
+    and the default for this deployment.
+
+    Returns aiohttp client kwargs carrying the bearer header. The token is
+    never logged; callers pass these straight to fsspec.
+    """
+    token = os.environ.get("EARTHDATA_TOKEN", "").strip()
+    if not token:
+        raise EarthdataTokenMissingError(
+            "EARTHDATA_TOKEN is not set. HTTPS access to the protected "
+            "MERRA-2 archive needs an Earthdata Login bearer token "
+            "(server-side only -- e.g. a Fly.io secret in production)."
+        )
+    return {"client_kwargs": {"headers": {"Authorization": f"Bearer {token}"}}}
+
+
+def https_url_for_s3(url: str) -> str:
+    """Map an s3:// MERRA-2 granule URL to its HTTPS archive equivalent.
+
+    s3://gesdisc-cumulus-prod-protected/MERRA2/<rest>
+        -> https://data.gesdisc.earthdata.nasa.gov/data/MERRA2/<rest>
+    Non-s3 URLs pass through unchanged.
+    """
+    if not url.startswith("s3://"):
+        return url
+    path = url[len("s3://"):]
+    _bucket, _, rest = path.partition("/")
+    return f"{DATA_HTTPS_BASE}/{rest}"

@@ -36,9 +36,9 @@ from pathlib import Path
 from agent.mappings import MERRA2_COLUMN_VARIABLES, canonical_variable
 
 try:  # imported as part of the backend package
-    from backend.earthdata_auth import s3_target_options
+    from backend.earthdata_auth import https_target_options, s3_target_options
 except ImportError:  # run as a script: python backend/grid.py
-    from earthdata_auth import s3_target_options
+    from earthdata_auth import https_target_options, s3_target_options
 
 AGGREGATIONS = ("hourly", "daily", "monthly_mean")
 MAX_NLON, MAX_NLAT = 360, 180
@@ -96,33 +96,51 @@ def _index_path() -> str:
     return os.environ.get("KERCHUNK_INDEX_PATH", DEFAULT_INDEX_PATH)
 
 
-def _refs_point_remote(ref_paths: list[str]) -> bool:
-    """True when any reference target is a remote URL (s3://, https://).
+def _ref_remote_protocol(ref_paths: list[str]) -> str | None:
+    """The protocol the reference targets point at: "s3", "https", or None.
 
-    Local reference targets (tests, local mirrors) need no S3 auth at all;
-    remote ones go through the Earthdata credential resolution.
+    None means every target is a local path (tests, local mirrors), which
+    needs no credentials at all. The protocol decides which credential
+    style the targets need -- S3 session keys or an Earthdata bearer
+    header -- so it must be read from the references themselves rather
+    than assumed.
     """
     for p in ref_paths:
         with open(p) as f:
-            refs = json.load(f).get("refs", {})
-        for val in refs.values():
-            target = val[0] if isinstance(val, (list, tuple)) else val
-            if isinstance(target, str) and "://" in target:
-                if target.split("://", 1)[0] in ("s3", "http", "https"):
-                    return True
-    return False
+            protocol = _protocol_of_refs(json.load(f))
+        if protocol is not None:
+            return protocol
+    return None
+
+
+def _protocol_of_refs(refs: dict) -> str | None:
+    """Protocol of the targets inside one already-loaded reference dict."""
+    for val in refs.get("refs", {}).values():
+        target = val[0] if isinstance(val, (list, tuple)) else val
+        if isinstance(target, str) and "://" in target:
+            scheme = target.split("://", 1)[0]
+            if scheme == "s3":
+                return "s3"
+            if scheme in ("http", "https"):
+                return "https"
+    return None
 
 
 def _default_target_options(ref_paths: list[str]) -> dict:
-    """fsspec target options for opening the byte ranges in references.
+    """fsspec options for reading the byte ranges the references name.
 
-    Local reference targets need no auth ({}). Remote targets resolve via
-    backend.earthdata_auth: MERRA2_S3_ANON=1 -> anonymous, EARTHDATA_TOKEN
-    -> exchanged session credentials, AWS_* in env -> standard AWS chain,
-    otherwise an honest 501 naming EARTHDATA_TOKEN.
+    Local targets need no auth ({}). HTTPS targets (the default for this
+    deployment) carry the Earthdata bearer token. s3:// targets resolve
+    via MERRA2_S3_ANON=1 -> anonymous, EARTHDATA_TOKEN -> exchanged
+    session credentials, AWS_* in env -> standard AWS chain -- but note
+    that direct S3 only works from inside AWS us-west-2; see
+    backend.earthdata_auth.https_target_options.
     """
-    if not _refs_point_remote(ref_paths):
+    protocol = _ref_remote_protocol(ref_paths)
+    if protocol is None:
         return {}
+    if protocol == "https":
+        return https_target_options()
     return s3_target_options()
 
 
@@ -180,6 +198,27 @@ def _parse_time(value: str, name: str) -> datetime:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
+
+
+def _is_date_only(value: str) -> bool:
+    """True when an ISO string carries a date but no time-of-day."""
+    v = value.strip().rstrip("Z")
+    return "T" not in v and " " not in v
+
+
+def _parse_end_time(value: str, name: str) -> datetime:
+    """Parse the INCLUSIVE end bound of a window.
+
+    A bare date parses to midnight, which as an inclusive end would select
+    nothing: MERRA-2's hourly steps sit at 00:30..23:30, so "2026-07-01"
+    to "2026-07-01" would be an empty window over a fully indexed day.
+    QueryPlan.time_end is documented as inclusive and the agent routinely
+    emits bare dates, so a date-valued end means the whole of that day.
+    """
+    dt = _parse_time(value, name)
+    if _is_date_only(value):
+        dt = dt + timedelta(days=1) - timedelta(microseconds=1)
+    return dt
 
 
 def _check_args(source: str, variable: str, agg: str) -> str:
@@ -244,9 +283,28 @@ def _open_dataset(ref_paths: list[str], target_options: dict | None = None):
     for p in ref_paths:
         with open(p) as f:
             refs = json.load(f)
-        fs = fsspec.filesystem(
-            "reference", fo=refs, target_options=target_options or {}
-        )
+        # remote_options -- NOT target_options -- carries credentials for
+        # the referenced granules. target_options configures reading the
+        # reference document itself, which is already a dict here, so it
+        # silently left remote reads unauthenticated.
+        # remote_options -- NOT target_options -- carries credentials for
+        # the referenced granules; target_options configures reading the
+        # reference document, which is already a dict here, so using it left
+        # remote reads unauthenticated.
+        #
+        # asynchronous=True on BOTH sides is required by zarr 3: it
+        # serialises the store to JSON and rebuilds it, and the rebuild
+        # rejects any mismatch with "Reference-FS's target filesystem must
+        # have same value of asynchronous". Local targets stay synchronous.
+        remote_kwargs: dict = {}
+        protocol = _protocol_of_refs(refs)
+        if protocol is not None:
+            remote_kwargs = {
+                "remote_protocol": protocol,
+                "remote_options": {**(target_options or {}), "asynchronous": True},
+                "asynchronous": True,
+            }
+        fs = fsspec.filesystem("reference", fo=refs, **remote_kwargs)
         try:
             datasets.append(
                 xr.open_dataset(fs.get_mapper(""), engine="zarr", chunks={})
@@ -422,7 +480,7 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     _require_geo_deps()
     var = _check_args(source, variable, agg)
     w, s, e, n = _parse_bbox(bbox)
-    start, end = _parse_time(t0, "t0"), _parse_time(t1, "t1")
+    start, end = _parse_time(t0, "t0"), _parse_end_time(t1, "t1")
     if end < start:
         raise BadGridRequestError("t1 must be >= t0.")
     # Archive-latency gate: MERRA-2 runs several weeks behind real time.

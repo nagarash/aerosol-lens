@@ -24,15 +24,20 @@ Collection facts (tavg1_2d_aer_Nx, M2T1NXAER):
   since 2026-08-01 00:30:00". The slicer opens each reference individually
   and concatenates the decoded datasets; never merge on raw time values.
 
-AUTHENTICATION (important): the bucket is *protected* — anonymous S3
-reads are rejected. Access requires an Earthdata Login account. Set
+AUTHENTICATION (important): the archive is *protected* — anonymous
+reads are rejected. Access requires an Earthdata Login account; set
 EARTHDATA_TOKEN to a long-lived bearer token (generate one in the
-Earthdata Login profile; server-side only, never in the repo): the
-builder exchanges it for temporary AWS session credentials
-automatically and refreshes them as needed. Alternatively export
-AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN directly
-(they last ~1h; re-export before each build). Set MERRA2_S3_ANON=1 only
-for a genuinely public mirror.
+Earthdata Login profile; server-side only, never in the repo).
+
+ACCESS PATH (verified 2026-09-13): GES DISC grants *direct S3* access
+only to callers running inside AWS us-west-2. From anywhere else — a
+laptop, Fly.io, any non-AWS host — the s3credentials exchange succeeds
+and returns valid session keys, but every GetObject still comes back
+403 Forbidden, because the denial is by request origin rather than by
+token. So the builder defaults to MERRA2_ACCESS=https, reading the same
+bytes over https://data.gesdisc.earthdata.nasa.gov/data/... with the
+bearer token, which works from any network and supports the same ranged
+reads. Set MERRA2_ACCESS=s3 only when genuinely running in us-west-2.
 
 Usage:
     export EARTHDATA_TOKEN=...   # or the three AWS_* vars, see above
@@ -62,13 +67,23 @@ import argparse
 import json
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 from pathlib import Path
 
 try:  # imported as part of the backend package
-    from backend.earthdata_auth import s3_target_options
+    from backend.earthdata_auth import (
+        https_target_options,
+        https_url_for_s3,
+        s3_target_options,
+    )
 except ImportError:  # run as a script: python backend/kerchunk_index.py
-    from earthdata_auth import s3_target_options
+    from earthdata_auth import (  # type: ignore[no-redef]
+        https_target_options,
+        https_url_for_s3,
+        s3_target_options,
+    )
 
 DEFAULT_COLLECTION = "tavg1_2d_aer_Nx"
 DEFAULT_SHORTNAME = "M2T1NXAER"
@@ -84,16 +99,24 @@ def _s3_prefix(prefix: str | None) -> str:
     return (prefix or os.environ.get("MERRA2_S3_PREFIX") or DEFAULT_PREFIX).rstrip("/")
 
 
-def _s3_options() -> dict:
-    """s3fs options for the MERRA-2 bucket.
+def _access_mode() -> str:
+    """"https" (default) or "s3" -- how granule bytes are fetched.
 
-    The builder always reads S3, so it resolves strictly via
-    backend.earthdata_auth: EARTHDATA_TOKEN exchange, the standard AWS
-    credential chain (AWS_* env vars, ~/.aws, IAM role), or
-    MERRA2_S3_ANON=1 for a genuinely public mirror. Missing credentials
-    raise an honest error naming EARTHDATA_TOKEN instead of failing
-    deep inside fsspec.
+    HTTPS is the default because GES DISC grants direct S3 access only to
+    callers inside AWS us-west-2; everywhere else GetObject returns 403
+    even with valid session credentials. Set MERRA2_ACCESS=s3 when the
+    builder genuinely runs in-region.
     """
+    mode = (os.environ.get("MERRA2_ACCESS") or "https").strip().lower()
+    if mode not in ("https", "s3"):
+        raise ValueError(f"MERRA2_ACCESS must be 'https' or 's3', got {mode!r}")
+    return mode
+
+
+def _options_for(url: str) -> dict:
+    """fsspec options appropriate to the URL's protocol."""
+    if url.startswith(("http://", "https://")):
+        return https_target_options()
     return s3_target_options()
 
 
@@ -132,7 +155,7 @@ def list_source_files(
     """
     import fsspec
 
-    fs = fsspec.filesystem("s3", **_s3_options())
+    fs = fsspec.filesystem("s3", **s3_target_options())
     pattern = f"{collection_prefix}/**/*.nc4"
     urls = sorted(fs.glob(pattern))
     if limit is not None:
@@ -140,12 +163,27 @@ def list_source_files(
     return [u if u.startswith("s3://") else f"s3://{u}" for u in urls]
 
 
+# Scanning one granule's HDF5 metadata costs hundreds of scattered small
+# reads. fsspec's default 5 MB block means each one drags in 5 MB; 1 MB
+# measured ~25% faster end to end (419s -> 319s per granule from Fly sjc)
+# without becoming latency-bound. Tune via MERRA2_BLOCK_SIZE if the
+# builder ever runs somewhere with very different RTT.
+DEFAULT_BLOCK_SIZE = 1_048_576
+
+
+def _block_size() -> int:
+    try:
+        return max(65_536, int(os.environ.get("MERRA2_BLOCK_SIZE", "")))
+    except (TypeError, ValueError):
+        return DEFAULT_BLOCK_SIZE
+
+
 def reference_for_url(url: str) -> dict:
     """Build a kerchunk reference dict for one remote NetCDF file."""
     import fsspec
     from kerchunk.hdf import SingleHdf5ToZarr
 
-    with fsspec.open(url, "rb", **_s3_options()) as f:
+    with fsspec.open(url, "rb", block_size=_block_size(), **_options_for(url)) as f:
         return SingleHdf5ToZarr(f, url).translate()
 
 
@@ -166,6 +204,7 @@ def build_index(
     shortname: str = DEFAULT_SHORTNAME,
     start_date: date | None = None,
     end_date: date | None = None,
+    workers: int = 1,
 ) -> Path:
     """Build kerchunk references for one MERRA-2 collection.
 
@@ -183,6 +222,12 @@ def build_index(
         urls = urls_for_date_range(base, collection, start_date, end_date)
     else:
         urls = list_source_files(base, limit)
+    if _access_mode() == "https":
+        # Direct S3 is in-region-only (us-west-2); the HTTPS archive
+        # endpoint serves the same bytes anywhere with a bearer token.
+        # The references then record https:// targets, and the slicer
+        # picks the matching credentials off that protocol.
+        urls = [https_url_for_s3(u) for u in urls]
     if not urls:
         raise RuntimeError(
             f"no .nc4 files found under {base!r}. The GES DISC bucket is "
@@ -191,23 +236,68 @@ def build_index(
             "https://data.gesdisc.earthdata.nasa.gov/s3credentials) or check "
             "MERRA2_S3_PREFIX / S3 reachability."
         )
-    print(f"indexing {len(urls)} file(s) from {base}")
+    print(f"indexing {len(urls)} file(s) from {base} "
+          f"({workers} worker(s), block_size={_block_size()})")
 
-    for url in urls:
+    lock = threading.Lock()
+    reported = [False]
+
+    def _one(url: str) -> tuple[str, str, str]:
+        """Index one granule. Returns (url, ref_name, status)."""
         ref_name = Path(url).stem + ".json"
         ref_path = out_dir / ref_name
         if ref_path.exists():
-            print(f"  skip (exists): {ref_name}")
-        else:
-            print(f"  indexing: {url}")
-            refs = reference_for_url(url)
-            ref_path.write_text(json.dumps(refs))
-            _report_chunking(url, refs)
+            return url, ref_name, "skip"
+        refs = reference_for_url(url)
+        # Write via a temp file + atomic rename: a half-written reference
+        # would otherwise be indistinguishable from a complete one on the
+        # next (resumable) run, and would be skipped forever.
+        tmp = ref_path.with_name(ref_path.name + ".tmp")
+        tmp.write_text(json.dumps(refs))
+        tmp.replace(ref_path)
+        with lock:
+            if not reported[0]:
+                _report_chunking(url, refs)
+                reported[0] = True
+        return url, ref_name, "built"
+
+    def _record(url: str, ref_name: str) -> None:
         d = date_of_filename(url)
         manifest["files"][d.isoformat() if d else url] = ref_name
         manifest_path.write_text(json.dumps(manifest, indent=1))
 
+    failures: list[tuple[str, Exception]] = []
+    if workers <= 1:
+        for url in urls:
+            try:
+                u, ref_name, status = _one(url)
+            except Exception as exc:  # keep going; the build is resumable
+                print(f"  FAILED {url}: {type(exc).__name__}: {exc}", flush=True)
+                failures.append((url, exc))
+                continue
+            print(f"  {status}: {ref_name}", flush=True)
+            _record(u, ref_name)
+    else:
+        # Threads, not processes: the work is dominated by network round
+        # trips, and h5py releases the GIL around reads.
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_one, u): u for u in urls}
+            for fut in as_completed(futures):
+                url = futures[fut]
+                try:
+                    u, ref_name, status = fut.result()
+                except Exception as exc:
+                    print(f"  FAILED {url}: {type(exc).__name__}: {exc}", flush=True)
+                    failures.append((url, exc))
+                    continue
+                print(f"  {status}: {ref_name}", flush=True)
+                with lock:
+                    _record(u, ref_name)
+
     print(f"manifest: {manifest_path} ({len(manifest['files'])} entries)")
+    if failures:
+        print(f"WARNING: {len(failures)} granule(s) failed; re-run to retry "
+              "(completed references are skipped).")
     return manifest_path
 
 
@@ -259,11 +349,16 @@ def main() -> None:
                              "bucket (GES DISC denies s3:ListBucket).")
     parser.add_argument("--end-date", default=None,
                         help="Last date to index (YYYY-MM-DD).")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Granules to index concurrently. One granule "
+                             "takes ~5 min from outside AWS, and the work is "
+                             "network-bound, so 4-8 cuts wall time roughly "
+                             "linearly.")
     args = parser.parse_args()
     start = date.fromisoformat(args.start_date) if args.start_date else None
     end = date.fromisoformat(args.end_date) if args.end_date else None
     build_index(args.collection, Path(args.out), args.limit, args.prefix,
-                args.shortname, start, end)
+                args.shortname, start, end, args.workers)
 
 
 if __name__ == "__main__":
