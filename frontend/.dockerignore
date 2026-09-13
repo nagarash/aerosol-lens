@@ -1,4 +1,0 @@
-Dockerfile
-.dockerignore
-fly.toml
-js/*.test.js
