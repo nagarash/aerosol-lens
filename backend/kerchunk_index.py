@@ -62,7 +62,7 @@ import argparse
 import json
 import os
 import re
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 try:  # imported as part of the backend package
@@ -100,6 +100,26 @@ def _s3_options() -> dict:
 def _collection_prefix(prefix: str, shortname: str) -> str:
     # <prefix>/M2T1NXAER.5.12.4/**.nc4  (version dir mirrors GES DISC)
     return f"{prefix}/{shortname}.5.12.4"
+
+
+def urls_for_date_range(
+    collection_prefix: str, collection: str, start: date, end: date
+) -> list[str]:
+    """Construct MERRA-2 file URLs directly for a date range.
+
+    GES DISC S3 credentials explicitly deny s3:ListBucket, so globbing
+    the bucket fails. File names are deterministic, so build the URLs
+    directly — only GetObject range reads are needed downstream.
+    """
+    urls = []
+    d = start
+    while d <= end:
+        urls.append(
+            f"{collection_prefix}/{d.year:04d}/{d.month:02d}/"
+            f"MERRA2_400.{collection}.{d.year:04d}{d.month:02d}{d.day:02d}.nc4"
+        )
+        d += timedelta(days=1)
+    return urls
 
 
 def list_source_files(
@@ -144,6 +164,8 @@ def build_index(
     limit: int | None = None,
     prefix: str | None = None,
     shortname: str = DEFAULT_SHORTNAME,
+    start_date: date | None = None,
+    end_date: date | None = None,
 ) -> Path:
     """Build kerchunk references for one MERRA-2 collection.
 
@@ -157,7 +179,10 @@ def build_index(
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
 
-    urls = list_source_files(base, limit)
+    if start_date is not None and end_date is not None:
+        urls = urls_for_date_range(base, collection, start_date, end_date)
+    else:
+        urls = list_source_files(base, limit)
     if not urls:
         raise RuntimeError(
             f"no .nc4 files found under {base!r}. The GES DISC bucket is "
@@ -228,8 +253,17 @@ def main() -> None:
                         help="Override MERRA2_S3_PREFIX, e.g. s3://bucket/MERRA2")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only index the first N files (for testing)")
+    parser.add_argument("--start-date", default=None,
+                        help="First date to index (YYYY-MM-DD). With --end-date, "
+                             "builds file URLs directly instead of listing the "
+                             "bucket (GES DISC denies s3:ListBucket).")
+    parser.add_argument("--end-date", default=None,
+                        help="Last date to index (YYYY-MM-DD).")
     args = parser.parse_args()
-    build_index(args.collection, Path(args.out), args.limit, args.prefix, args.shortname)
+    start = date.fromisoformat(args.start_date) if args.start_date else None
+    end = date.fromisoformat(args.end_date) if args.end_date else None
+    build_index(args.collection, Path(args.out), args.limit, args.prefix,
+                args.shortname, start, end)
 
 
 if __name__ == "__main__":
