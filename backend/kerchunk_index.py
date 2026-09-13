@@ -66,9 +66,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 try:  # imported as part of the backend package
-    from backend.earthdata_auth import s3_target_options
+    from backend.earthdata_auth import remote_target_options
 except ImportError:  # run as a script: python backend/kerchunk_index.py
-    from earthdata_auth import s3_target_options
+    from earthdata_auth import remote_target_options
 
 DEFAULT_COLLECTION = "tavg1_2d_aer_Nx"
 DEFAULT_SHORTNAME = "M2T1NXAER"
@@ -76,6 +76,10 @@ DEFAULT_SHORTNAME = "M2T1NXAER"
 # tutorials. NOTE: this bucket is *protected* — Earthdata Login temporary
 # credentials are required (see module docstring); anonymous reads fail.
 DEFAULT_PREFIX = "s3://gesdisc-cumulus-prod-protected/MERRA2"
+# HTTPS fallback: GES DISC's S3 session credentials (s3-same-region-access-role)
+# deny non-us-east-1 access, so from other regions use the HTTPS data archive
+# with the Earthdata Login bearer token (supports HTTP range requests).
+HTTPS_DATA_PREFIX = "https://data.gesdisc.earthdata.nasa.gov/data/MERRA2"
 
 FILENAME_DATE_RE = re.compile(r"\.(\d{8})\.nc4$")
 
@@ -140,12 +144,22 @@ def list_source_files(
     return [u if u.startswith("s3://") else f"s3://{u}" for u in urls]
 
 
+def _https_options() -> dict:
+    """fsspec target options for the GES DISC HTTPS data archive."""
+    return remote_target_options("https://data.gesdisc.earthdata.nasa.gov/")
+
+
+def _file_options(url: str) -> dict:
+    """fsspec open options for a source URL (S3 or HTTPS)."""
+    return remote_target_options(url)
+
+
 def reference_for_url(url: str) -> dict:
     """Build a kerchunk reference dict for one remote NetCDF file."""
     import fsspec
     from kerchunk.hdf import SingleHdf5ToZarr
 
-    with fsspec.open(url, "rb", **_s3_options()) as f:
+    with fsspec.open(url, "rb", **_file_options(url)) as f:
         return SingleHdf5ToZarr(f, url).translate()
 
 
@@ -166,13 +180,17 @@ def build_index(
     shortname: str = DEFAULT_SHORTNAME,
     start_date: date | None = None,
     end_date: date | None = None,
+    source: str = "s3",
 ) -> Path:
     """Build kerchunk references for one MERRA-2 collection.
 
     Writes ``<stem>.json`` per NetCDF file plus ``index.json`` manifest.
     Resumable: existing reference files are skipped. Returns the manifest path.
     """
-    base = _collection_prefix(_s3_prefix(prefix), shortname)
+    if source == "https":
+        base = f"{HTTPS_DATA_PREFIX}/{shortname}.5.12.4"
+    else:
+        base = _collection_prefix(_s3_prefix(prefix), shortname)
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "index.json"
     manifest: dict = {"collection": collection, "prefix": base, "files": {}}
@@ -259,11 +277,15 @@ def main() -> None:
                              "bucket (GES DISC denies s3:ListBucket).")
     parser.add_argument("--end-date", default=None,
                         help="Last date to index (YYYY-MM-DD).")
+    parser.add_argument("--source", default="s3", choices=("s3", "https"),
+                        help="Read MERRA-2 via S3 (needs us-east-1-adjacent "
+                             "credentials) or the GES DISC HTTPS archive "
+                             "(bearer token, works from any region).")
     args = parser.parse_args()
     start = date.fromisoformat(args.start_date) if args.start_date else None
     end = date.fromisoformat(args.end_date) if args.end_date else None
     build_index(args.collection, Path(args.out), args.limit, args.prefix,
-                args.shortname, start, end)
+                args.shortname, start, end, args.source)
 
 
 if __name__ == "__main__":

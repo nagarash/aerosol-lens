@@ -36,9 +36,9 @@ from pathlib import Path
 from agent.mappings import MERRA2_COLUMN_VARIABLES, canonical_variable
 
 try:  # imported as part of the backend package
-    from backend.earthdata_auth import s3_target_options
+    from backend.earthdata_auth import https_target_options, s3_target_options
 except ImportError:  # run as a script: python backend/grid.py
-    from earthdata_auth import s3_target_options
+    from earthdata_auth import https_target_options, s3_target_options
 
 AGGREGATIONS = ("hourly", "daily", "monthly_mean")
 MAX_NLON, MAX_NLAT = 360, 180
@@ -96,33 +96,33 @@ def _index_path() -> str:
     return os.environ.get("KERCHUNK_INDEX_PATH", DEFAULT_INDEX_PATH)
 
 
-def _refs_point_remote(ref_paths: list[str]) -> bool:
-    """True when any reference target is a remote URL (s3://, https://).
-
-    Local reference targets (tests, local mirrors) need no S3 auth at all;
-    remote ones go through the Earthdata credential resolution.
-    """
+def _remote_scheme(ref_paths: list[str]) -> str | None:
+    """'https' / 's3' / None based on the first remote reference target."""
     for p in ref_paths:
         with open(p) as f:
             refs = json.load(f).get("refs", {})
         for val in refs.values():
             target = val[0] if isinstance(val, (list, tuple)) else val
             if isinstance(target, str) and "://" in target:
-                if target.split("://", 1)[0] in ("s3", "http", "https"):
-                    return True
-    return False
+                scheme = target.split("://", 1)[0]
+                if scheme in ("s3", "http", "https"):
+                    return "https" if scheme in ("http", "https") else "s3"
+    return None
 
 
 def _default_target_options(ref_paths: list[str]) -> dict:
     """fsspec target options for opening the byte ranges in references.
 
     Local reference targets need no auth ({}). Remote targets resolve via
-    backend.earthdata_auth: MERRA2_S3_ANON=1 -> anonymous, EARTHDATA_TOKEN
-    -> exchanged session credentials, AWS_* in env -> standard AWS chain,
-    otherwise an honest 501 naming EARTHDATA_TOKEN.
+    backend.earthdata_auth: https:// refs use the Earthdata bearer token
+    directly; s3:// refs use the exchanged session credentials (or the
+    standard AWS chain); otherwise an honest 501 naming EARTHDATA_TOKEN.
     """
-    if not _refs_point_remote(ref_paths):
+    scheme = _remote_scheme(ref_paths)
+    if scheme is None:
         return {}
+    if scheme == "https":
+        return https_target_options()
     return s3_target_options()
 
 

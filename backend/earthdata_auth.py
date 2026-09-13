@@ -192,3 +192,27 @@ def s3_target_options() -> dict:
         "AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN, or set "
         "MERRA2_S3_ANON=1 for a public mirror."
     )
+
+
+def https_target_options() -> dict:
+    """fsspec target options for the GES DISC HTTPS data archive.
+
+    Uses the Earthdata Login bearer token directly (the S3 session
+    credentials deny non-us-east-1 access, so HTTPS is the fallback for
+    other regions). Raises EarthdataTokenMissingError when unset.
+    """
+    token = os.environ.get("EARTHDATA_TOKEN", "").strip()
+    if not token:
+        raise EarthdataTokenMissingError(
+            "EARTHDATA_TOKEN is not set: the GES DISC HTTPS archive requires "
+            "an Earthdata Login bearer token."
+        )
+    # The token lives only in this header and process memory.
+    return {"headers": {"Authorization": f"Bearer {token}"}}
+
+
+def remote_target_options(url: str) -> dict:
+    """fsspec target options for a remote reference URL (S3 or HTTPS)."""
+    if url.startswith("https://"):
+        return https_target_options()
+    return s3_target_options()
