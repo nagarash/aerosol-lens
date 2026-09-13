@@ -21,6 +21,29 @@ const BACKEND_URL = (
 const GOOGLE_KEY_STORAGE = "google_aq_key";
 const GOOGLE_MAPTYPE = "UAQI_RED_GREEN"; // Google's red-green US-AQI heatmap
 
+// Basemap choices (all keyless Esri; tile order z/y/x). Satellite is the
+// default: maximum land detail, and yellow-orange-red plumes pop on it.
+const BASEMAPS = {
+  satellite: {
+    label: "Satellite",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    // Reference labels (place names + borders) drawn above imagery.
+    overlay: ["https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"],
+  },
+  streets: {
+    label: "Streets",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"],
+  },
+  light: {
+    label: "Light",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+  },
+  dark: {
+    label: "Dark",
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+  },
+};
+
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -28,11 +51,14 @@ const map = new maplibregl.Map({
     sources: {
       basemap: {
         type: "raster",
-        // CARTO started requiring an API key for basemaps; Esri's dark gray
-        // canvas is keyless. Tile order for Esri is z/y/x.
-        tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
+        tiles: BASEMAPS.satellite.tiles,
         tileSize: 256,
         attribution: "© Esri & contributors",
+      },
+      basemap_labels: {
+        type: "raster",
+        tiles: BASEMAPS.satellite.overlay,
+        tileSize: 256,
       },
     },
     layers: [
@@ -40,13 +66,36 @@ const map = new maplibregl.Map({
         id: "basemap",
         type: "raster",
         source: "basemap",
-        paint: { "raster-opacity": 0.9 },
+        paint: { "raster-opacity": 1 },
+      },
+      {
+        id: "basemap-labels",
+        type: "raster",
+        source: "basemap_labels",
+        paint: { "raster-opacity": 1 },
       },
     ],
   },
   center: [0, 20],
   zoom: 2,
 });
+
+// Switch basemap; the plume/aqi data layers are added above these, so they
+// stay on top. Labels overlay only applies to satellite.
+function setBasemap(name) {
+  const cfg = BASEMAPS[name];
+  if (!cfg || !map.getSource("basemap")) return;
+  map.getSource("basemap").setTiles(cfg.tiles);
+  if (cfg.overlay) {
+    map.getSource("basemap_labels").setTiles(cfg.overlay);
+    map.setLayoutProperty("basemap-labels", "visibility", "visible");
+  } else {
+    map.setLayoutProperty("basemap-labels", "visibility", "none");
+  }
+  try { localStorage.setItem("aerosol_basemap", name); } catch (_) {}
+  const sel = document.getElementById("basemap-select");
+  if (sel) sel.value = name;
+}
 
 map.addControl(new maplibregl.NavigationControl(), "top-right");
 
@@ -127,6 +176,18 @@ document.querySelectorAll("#mode-toggle button").forEach((btn) => {
     );
     clearDataLayer();
   });
+});
+
+// Basemap picker: restore saved choice, wire the select.
+try {
+  const saved = localStorage.getItem("aerosol_basemap");
+  if (saved && BASEMAPS[saved]) {
+    // Apply after the style loads so sources exist.
+    map.once("load", () => setBasemap(saved));
+  }
+} catch (_) {}
+document.getElementById("basemap-select").addEventListener("change", (e) => {
+  setBasemap(e.target.value);
 });
 
 // ---------------------------------------------------------------------------

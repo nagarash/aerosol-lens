@@ -34,6 +34,14 @@ html, body {
 }
 #mode-toggle button.active { background: #2f6fed; color: #fff; border-color: #2f6fed; }
 
+#basemap-select {
+  top: 12px; left: 50%; transform: translateX(-50%);
+  background: rgba(13, 17, 23, 0.88); color: #cfd6e2;
+  border: 1px solid #2a3340; border-radius: 10px;
+  padding: 6px 8px; cursor: pointer; z-index: 10;
+  position: absolute;
+}
+
 #legend { left: 12px; bottom: 76px; width: 240px; }
 #legend-title { font-weight: 600; margin-bottom: 6px; }
 #legend-bar { height: 12px; border-radius: 3px; background: #333; }
