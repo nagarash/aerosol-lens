@@ -107,6 +107,12 @@ function percentile(sorted, q) {
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+/** Smoothstep in [0,1]: 0 at/below a, 1 at/above b, smooth between. */
+function smoothstep(a, b, x) {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
 /** Data-driven range: p2/p98 over finite values. Returns {vmin, vmax, vmid}. */
 function normalizeRange(values2d) {
   const flat = [];
@@ -175,7 +181,9 @@ function gridBounds(grid) {
  * Render the grid to an RGBA pixel buffer.
  * Returns {width, height, data (Uint8ClampedArray), vmin, vmid, vmax,
  * colormap}. Canvas row 0 (top) is the northernmost latitude; NaN/null
- * cells are transparent.
+ * cells are transparent. Low values fade to transparent (only the plume
+ * body is painted) and the bbox edges are feathered, so the overlay melts
+ * into the basemap instead of pasting a hard rectangle.
  */
 function gridToPixelBuffer(grid, opts = {}) {
   const { lats, lons, values } = grid;
@@ -198,6 +206,10 @@ function gridToPixelBuffer(grid, opts = {}) {
   const { vmin, vmax, vmid } = normalizeRange(values);
   const span = vmax - vmin;
   const data = new Uint8ClampedArray(nx * ny * 4);
+  // Feather the bbox border (in grid pixels) so no hard rectangle edge
+  // shows on the map. Skipped on tiny grids where every pixel is a border.
+  const featherPx =
+    Math.min(nx, ny) >= 6 ? Math.max(2, Math.round(Math.min(nx, ny) * 0.05)) : 0;
   for (let r = 0; r < ny; r++) {
     // lats ascend south->north; canvas row 0 is the top (north).
     const outRow = ny - 1 - r;
@@ -211,11 +223,19 @@ function gridToPixelBuffer(grid, opts = {}) {
         continue;
       }
       const t = Math.min(1, Math.max(0, (v - vmin) / span));
+      // Background haze fades out: alpha ramps from 0 at the bottom of the
+      // scale to full by t=0.35, so only the plume body gets painted.
+      const valueAlpha = smoothstep(0.04, 0.35, t);
+      let edgeAlpha = 1;
+      if (featherPx > 0) {
+        const d = Math.min(c, nx - 1 - c, outRow, ny - 1 - outRow);
+        edgeAlpha = Math.min(1, d / featherPx);
+      }
       const [rr, gg, bb] = sampleColormap(stops, t);
       data[i] = rr;
       data[i + 1] = gg;
       data[i + 2] = bb;
-      data[i + 3] = 235; // slightly translucent so the basemap breathes
+      data[i + 3] = Math.round(235 * valueAlpha * edgeAlpha);
     }
   }
   return { width: nx, height: ny, data, vmin, vmid, vmax, colormap: name };
@@ -241,6 +261,7 @@ const GridRender = {
   colormapForVariable,
   prettyVariable,
   percentile,
+  smoothstep,
   normalizeRange,
   unwrapLons,
   gridCorners,

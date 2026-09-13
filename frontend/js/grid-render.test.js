@@ -175,4 +175,49 @@ check("prettyVariable names the aerosol", () => {
   assert.equal(GR.prettyVariable("whatever"), "whatever");
 });
 
+// 7. Plume fade: low values transparent, edges feathered.
+check("smoothstep ramps 0->1 between the stops", () => {
+  assert.equal(GR.smoothstep(0.04, 0.35, 0.0), 0);
+  assert.equal(GR.smoothstep(0.04, 0.35, 0.04), 0);
+  assert.equal(GR.smoothstep(0.04, 0.35, 0.35), 1);
+  assert.equal(GR.smoothstep(0.04, 0.35, 1.0), 1);
+  const mid = GR.smoothstep(0.04, 0.35, 0.195);
+  assert.ok(mid > 0.4 && mid < 0.6, `midpoint ≈ 0.5, got ${mid}`);
+});
+check("background haze fades to transparent, plume core stays opaque", () => {
+  // 10x10 gradient 0..1; normalization is p2/p98 ≈ the same range.
+  const values = [];
+  for (let r = 0; r < 10; r++) {
+    const row = [];
+    for (let c = 0; c < 10; c++) row.push((r * 10 + c) / 99);
+    values.push(row);
+  }
+  const buf = GR.gridToPixelBuffer({
+    variable: "DUEXTTAU",
+    lats: Array.from({ length: 10 }, (_, i) => i),
+    lons: Array.from({ length: 10 }, (_, i) => i),
+    values,
+  });
+  const alpha = (y, x) => buf.data[(y * 10 + x) * 4 + 3];
+  // Interior low-value pixel (south-west, t≈0.1) -> nearly transparent.
+  assert.ok(alpha(8, 1) < 60, `haze alpha ${alpha(8, 1)} should be faint`);
+  // Interior high-value pixel (north-east, t≈0.8, 2px from the border so
+  // the edge feather does not touch it) -> near full opacity.
+  assert.ok(alpha(2, 7) > 200, `core alpha ${alpha(2, 7)} should be strong`);
+});
+check("bbox border pixels are feathered on larger grids", () => {
+  const values = Array.from({ length: 10 }, () => Array(10).fill(0.8));
+  const buf = GR.gridToPixelBuffer({
+    variable: "DUEXTTAU",
+    lats: Array.from({ length: 10 }, (_, i) => i),
+    lons: Array.from({ length: 10 }, (_, i) => i),
+    values,
+  });
+  const alpha = (y, x) => buf.data[(y * 10 + x) * 4 + 3];
+  // t = 0.5 -> valueAlpha = 1, so border vs center differs only by feather.
+  assert.equal(alpha(0, 5), 0, "outermost border row is fully feathered out");
+  assert.ok(alpha(1, 5) < alpha(5, 5), "feather ramp rises toward the interior");
+  assert.ok(alpha(5, 5) > 200, "interior pixel keeps full alpha");
+});
+
 console.log(`\n${n} tests passed.`);
