@@ -22,9 +22,19 @@ Data paths:
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
+
+# Structured request logging. On Fly.io, stdout is captured by `fly logs`.
+# Log level via LOG_LEVEL env (default INFO); set to DEBUG for per-chunk detail.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("aerosol-lens")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -216,22 +226,28 @@ def ask(req: AskRequest) -> AskResponse:
     # Scope the cache by date + location: "last week" asked on different
     # days, or "here" from different places, must not collide.
     scope = f"{reference_date}|{req.user_location or ''}"
+    t_start = time.monotonic()
+    log.info("ask: q=%r ref_date=%s location=%s", question, reference_date, req.user_location)
 
     # 1. Cache: repeated questions never touch the model.
     cached_plan = plan_cache.get(question, scope=scope)
     if cached_plan is not None:
         plan = cached_plan
         was_cached = True
+        log.info("ask: cache HIT q=%r", question)
     else:
         # 2. Agent parse (LLM) -> geocode -> deterministic validation.
         #    _parse_with_agent retries once internally, then fails honestly.
         try:
             plan = _parse_with_agent(question, reference_date, req.user_location)
         except LLMNotConfiguredError as exc:
+            log.warning("ask: LLM not configured q=%r", question)
             raise HTTPException(status_code=501, detail=str(exc)) from exc
         except RateLimitedError as exc:
+            log.warning("ask: rate limited q=%r", question)
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except (PlanRejectedError, UnknownPlaceError, PydanticValidationError) as exc:
+            log.warning("ask: plan rejected q=%r err=%s", question, exc)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         plan_cache.put(question, plan, scope=scope)
         was_cached = False
@@ -241,6 +257,12 @@ def ask(req: AskRequest) -> AskResponse:
     if not plan.caption:
         plan.caption = _auto_caption(plan)
 
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+    log.info(
+        "ask: done q=%r cached=%s plan=%s/%s/%s t=%s..%s bbox=%s data_url=%s %.0fms",
+        question, was_cached, plan.source, plan.level, plan.variable,
+        plan.time_start, plan.time_end, plan.bbox, data_url, elapsed_ms,
+    )
     return AskResponse(plan=plan, data_url=data_url, legend=legend, cached=was_cached)
 
 
@@ -267,6 +289,11 @@ def _parse_with_agent(
     for _attempt in range(2):
         try:
             draft = _draft_from_model(model, messages)
+            log.info(
+                "agent: attempt=%d model=%s draft=%s",
+                _attempt, model,
+                draft.model_dump_json() if draft is not None else "NEED_LOCATION",
+            )
             if draft is None:  # model emitted {"error": "need_location"}
                 raise PlanRejectedError(
                     "the question refers to 'here'/'my area' but no user "
@@ -414,12 +441,17 @@ def grid(
         get_grid,
     )
 
+    t_start = time.monotonic()
+    log.info(
+        "grid: source=%s var=%s bbox=%s t=%s..%s agg=%s",
+        source, variable, bbox, t0, t1, agg,
+    )
     try:
         # target_options=None -> auto: local reference targets need no auth;
         # remote (S3) targets resolve via backend.earthdata_auth --
         # EARTHDATA_TOKEN exchange, the AWS credential chain, or an honest
         # 501. MERRA2_S3_ANON=1 forces anonymous reads for public mirrors.
-        return get_grid(
+        result = get_grid(
             source=source,
             variable=variable,
             bbox=bbox,
@@ -428,12 +460,28 @@ def grid(
             agg=agg,
         )
     except (GridDepsMissingError, IndexNotBuiltError) as exc:
+        log.warning("grid: 501 %s", exc)
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except EarthdataTokenMissingError as exc:
+        log.warning("grid: 501 %s", exc)
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except EarthdataExchangeError as exc:
+        log.warning("grid: 502 %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except (UnknownVariableError, BadGridRequestError) as exc:
+        log.warning("grid: 422 %s", exc)
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except GridFetchError as exc:
+        log.warning("grid: 502 %s", exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    elapsed_ms = (time.monotonic() - t_start) * 1000
+    vals = result.get("values", [])
+    nlat = len(vals)
+    nlon = len(vals[0]) if nlat else 0
+    log.info(
+        "grid: done var=%s %dx%d t=%s..%s %.0fms",
+        variable, nlon, nlat, result.get("time_start"), result.get("time_end"),
+        elapsed_ms,
+    )
+    return result
