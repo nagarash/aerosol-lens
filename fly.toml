@@ -1,5 +1,5 @@
 # Fly.io config for the Aerosol Lens backend (FastAPI).
-# Deploy with: flyctl deploy --config backend/fly.toml  (run from repo root)
+# Deploy with: fly deploy  (run from repo root)
 app = "aerosol-lens-api"
 primary_region = "sjc"
 
