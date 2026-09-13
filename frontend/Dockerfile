@@ -1,13 +1,11 @@
-# Static frontend: plain HTML/JS/CSS, no build step. Served by nginx, same
-# pattern as docker-compose.yml's frontend service, packaged for Fly.io.
+# Static frontend: plain HTML/JS/CSS, no build step. Served by nginx.
 #
-# NOTE: Fly resolves `dockerfile` relative to this app dir (frontend/) but
-# the build CONTEXT sent to the builder is the repo root (git root) --
-# confirmed empirically, not documented. `COPY frontend/` (not `COPY .`)
-# is deliberate: a bare `COPY .` here copies the WHOLE REPO, .git included,
-# into the public web root.
+# Deploy from this directory: fly deploy -c fly.toml -a aerosol-lens
+# The build context is this directory (frontend/), so COPY . below copies
+# index.html, app.js, config.js, styles.css and js/ -- never the repo root.
+# (.dockerignore keeps the Dockerfile itself and test files out.)
 FROM nginx:alpine
 
-COPY frontend/ /usr/share/nginx/html/
+COPY . /usr/share/nginx/html/
 
 EXPOSE 80
