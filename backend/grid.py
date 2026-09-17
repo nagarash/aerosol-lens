@@ -7,6 +7,10 @@ Pipeline:
     -> select (variable, bbox, time) -> aggregate -> downsample
     -> compact JSON {variable, units, lats, lons, values, ...}
 
+Responses are cached on disk (see grid_cache: identical queries hit the
+cache instead of re-reading the archive); each granule's slice is
+materialized on its own thread (see grid_fetch.parallel_compute).
+
 Only byte ranges covering the requested chunks cross the network; whole
 NetCDF files are never downloaded. xarray/fsspec/kerchunk are imported
 lazily so the backend stays importable without the geo stack (the /grid
@@ -28,6 +32,7 @@ v1 simplifications (documented, not hidden):
 from __future__ import annotations
 
 import json
+import logging
 import os
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
@@ -39,6 +44,14 @@ try:  # imported as part of the backend package
     from backend.earthdata_auth import https_target_options, s3_target_options
 except ImportError:  # run as a script: python backend/grid.py
     from earthdata_auth import https_target_options, s3_target_options
+
+try:  # imported as part of the backend package
+    from backend import grid_cache, grid_fetch
+except ImportError:  # run as a script: python backend/grid.py
+    import grid_cache
+    import grid_fetch
+
+log = logging.getLogger("aerosol_lens.grid")
 
 AGGREGATIONS = ("hourly", "daily", "monthly_mean")
 MAX_NLON, MAX_NLAT = 360, 180
@@ -264,17 +277,22 @@ def _refs_for_window(manifest: dict, t0: datetime, t1: datetime) -> list[str]:
 # Dataset IO (fsspec + kerchunk + xarray)
 
 
-def _open_dataset(ref_paths: list[str], target_options: dict | None = None):
-    """Open reference files as one xarray dataset (lazy; no data read yet).
+def _open_datasets(ref_paths: list[str], target_options: dict | None = None):
+    """Open reference files as a list of lazy xarray datasets (no data read yet).
 
     Each granule is opened INDIVIDUALLY so its time coordinate decodes
-    against its own CF units, then the decoded datasets are concatenated
-    along time. This is deliberate: real MERRA-2 granules use PER-FILE
-    time origins (e.g. "minutes since 2026-08-01 00:30:00"), so the raw
-    time values are identical across files. kerchunk's MultiZarrToZarr
-    concatenates on raw values and would silently collapse every day onto
-    the first granule's date; per-file open + xr.concat is the
-    straightforward correct approach.
+    against its own CF units, then the caller concatenates the decoded
+    datasets along time. This is deliberate: real MERRA-2 granules use
+    PER-FILE time origins (e.g. "minutes since 2026-08-01 00:30:00"), so
+    the raw time values are identical across files. kerchunk's
+    MultiZarrToZarr concatenates on raw values and would silently collapse
+    every day onto the first granule's date; per-file open + xr.concat is
+    the straightforward correct approach.
+
+    Returning the list (instead of one concatenated dataset) also lets
+    the caller materialize each granule's slice on its own thread
+    (see grid_fetch.parallel_compute): granules are fully independent
+    until the final concat.
     """
     import fsspec
     import xarray as xr
@@ -314,6 +332,14 @@ def _open_dataset(ref_paths: list[str], target_options: dict | None = None):
                 f"failed to open kerchunk reference {p!r}: {exc}"
             ) from exc
 
+    return datasets
+
+
+def _open_dataset(ref_paths: list[str], target_options: dict | None = None):
+    """Open reference files as one xarray dataset, concatenated along time."""
+    import xarray as xr
+
+    datasets = _open_datasets(ref_paths, target_options=target_options)
     if len(datasets) == 1:
         return datasets[0]
     try:
@@ -479,7 +505,9 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     """
     _require_geo_deps()
     var = _check_args(source, variable, agg)
-    w, s, e, n = _parse_bbox(bbox)
+    # Snap the bbox to 2 decimals (~1 km): equivalent queries share cache
+    # keys, and the served slice always matches the key exactly.
+    w, s, e, n = grid_cache.normalize_bbox(_parse_bbox(bbox))
     start, end = _parse_time(t0, "t0"), _parse_end_time(t1, "t1")
     if end < start:
         raise BadGridRequestError("t1 must be >= t0.")
@@ -500,18 +528,43 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     if target_options is None:
         target_options = _default_target_options(ref_paths)
 
+    # Disk cache: identical queries are common (demos, shared links,
+    # frontend re-asks) and historical granules are immutable.
+    cdir = grid_cache.cache_dir()
+    ckey = grid_cache.cache_key(source, var, agg, (w, s, e, n), start, end)
+    if cdir is not None:
+        ttl = grid_cache.ttl_for_window(
+            end.date(), date.today() - timedelta(days=_latency_days() + 1))
+        hit = grid_cache.read(cdir, ckey, ttl)
+        if hit is not None:
+            hit = dict(hit)
+            hit["cache_hit"] = True
+            log.info("grid: cache HIT var=%s t=%s..%s",
+                     var, start.date(), end.date())
+            return hit
+
     try:
-        ds = _open_dataset(ref_paths, target_options=target_options)
-        da = slice_variable(ds, var, (w, s, e, n), start, end)
-        steps = int(da.sizes["time"])
+        datasets = _open_datasets(ref_paths, target_options=target_options)
+        # Slice each granule lazily, then materialize the slices in
+        # parallel: granules are independent until the final concat, and
+        # the HTTPS byte-range reads dominate wall-clock time.
+        das = [slice_variable(ds, var, (w, s, e, n), start, end)
+               for ds in datasets]
+        steps = sum(int(da.sizes["time"]) for da in das)
+        fetched = grid_fetch.parallel_compute(das)
+        import xarray as xr
+        da = fetched[0] if len(fetched) == 1 else xr.concat(fetched, dim="time")
         field = collapse_time(da, agg)
-        # Materialize only the selected slice (single range-read burst).
-        field = field.compute()
+        # fetched arrays are already in memory; collapse/downsample are eager.
         field, was_downsampled = downsample(field)
-        return to_grid_json(field, var, start, end, agg, was_downsampled, steps)
+        result = to_grid_json(field, var, start, end, agg, was_downsampled, steps)
+        result["cache_hit"] = False
     except GridError:
         raise
     except Exception as exc:
         raise GridFetchError(
             f"failed to read grid slice for {var} {bbox} {t0}..{t1}: {exc}"
         ) from exc
+    if cdir is not None:
+        grid_cache.write(cdir, ckey, result)
+    return result
