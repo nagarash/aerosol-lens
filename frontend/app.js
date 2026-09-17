@@ -237,7 +237,7 @@ $("chat-form").addEventListener("submit", async (e) => {
 // Rendering: exactly one data layer at a time.
 
 function clearDataLayer() {
-  for (const id of ["data-layer", "data-source"]) {
+  for (const id of ["data-layer", "data-source", "mask-layer", "mask-source", "bbox-line", "bbox-source"]) {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
   }
@@ -301,7 +301,57 @@ function renderAirQuality(plan, data_url) {
     ],
     { padding: 40 }
   );
+  addSpotlightMask(plan.bbox);
   renderSurfaceLegend(plan);
+}
+
+// Google's heatmap tiles are global pre-rendered rasters: they paint every
+// region, not just the queried place. Dim everything outside the plan's bbox
+// (spotlight mask) and outline the bbox so the queried area reads clearly.
+function addSpotlightMask(bbox) {
+  const [w, s, e, n] = bbox;
+  map.addSource("mask-source", {
+    type: "geojson",
+    data: {
+      type: "FeatureCollection",
+      features: [
+        {
+          type: "Feature",
+          properties: {},
+          geometry: {
+            type: "Polygon",
+            coordinates: [
+              [[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]],
+              [[w, s], [w, n], [e, n], [e, s], [w, s]],
+            ],
+          },
+        },
+      ],
+    },
+  });
+  map.addLayer({
+    id: "mask-layer",
+    type: "fill",
+    source: "mask-source",
+    paint: { "fill-color": "#000000", "fill-opacity": 0.5 },
+  });
+  map.addSource("bbox-source", {
+    type: "geojson",
+    data: {
+      type: "Feature",
+      properties: {},
+      geometry: {
+        type: "LineString",
+        coordinates: [[w, s], [w, n], [e, n], [e, s], [w, s]],
+      },
+    },
+  });
+  map.addLayer({
+    id: "bbox-line",
+    type: "line",
+    source: "bbox-source",
+    paint: { "line-color": "#ffffff", "line-width": 2, "line-opacity": 0.9 },
+  });
 }
 
 function renderSurfaceLegend(plan) {
