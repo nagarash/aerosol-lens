@@ -52,12 +52,12 @@ const COLORMAPS = {
 };
 
 const PRETTY_VARIABLES = {
-  DUEXTTAU: "Dust AOD",
-  TOTEXTTAU: "Total AOD",
-  BCEXTTAU: "Black carbon AOD",
-  OCEXTTAU: "Organic carbon AOD",
-  SUEXTTAU: "Sulfate AOD",
-  SSEXTTAU: "Sea salt AOD",
+  DUEXTTAU: "Dust",
+  TOTEXTTAU: "Total aerosols",
+  BCEXTTAU: "Black carbon",
+  OCEXTTAU: "Organic carbon",
+  SUEXTTAU: "Sulfate",
+  SSEXTTAU: "Sea salt",
 };
 
 function hexToRgb(hex) {

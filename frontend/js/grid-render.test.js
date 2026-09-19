@@ -170,8 +170,9 @@ check("formatTick keeps AOD-scale precision", () => {
   assert.equal(GR.formatTick(0.336), "0.336");
 });
 check("prettyVariable names the aerosol", () => {
-  assert.equal(GR.prettyVariable("DUEXTTAU"), "Dust AOD");
-  assert.equal(GR.prettyVariable("TOTEXTTAU"), "Total AOD");
+  assert.equal(GR.prettyVariable("DUEXTTAU"), "Dust");
+  assert.equal(GR.prettyVariable("TOTEXTTAU"), "Total aerosols");
+  assert.equal(GR.prettyVariable("BCEXTTAU"), "Black carbon");
   assert.equal(GR.prettyVariable("whatever"), "whatever");
 });
 
