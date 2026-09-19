@@ -348,15 +348,17 @@ def _clamp_dateless_window(question: str, reference_date: str, plan: QueryPlan) 
     The MERRA-2 archive runs ~MERRA2_LATENCY_DAYS behind real time, so a
     default-to-today window would 422 at the /grid latency gate. When the
     question carries no time expression, clamp the window to the newest
-    plausible granule date. Explicit dates (including "today") are never
+    date with servable data (grid.newest_available_date: union of the
+    Zarr field store and kerchunk-manifest coverage, capped at the
+    plausible archive edge). Explicit dates (including "today") are never
     touched: asking for a day with no data still fails honestly.
     Idempotent, so cached plans are safe.
     """
-    from .grid import newest_plausible_date
+    from .grid import newest_available_date
 
     if jev.extract_time(question, reference_date).explicit:
         return plan
-    newest = newest_plausible_date()
+    newest = newest_available_date()
     plan.time_start = datetime(newest.year, newest.month, newest.day, tzinfo=timezone.utc)
     plan.time_end = plan.time_start + timedelta(days=1) - timedelta(seconds=1)
     log.info("ask: dateless question; clamped window to newest available %s", newest)

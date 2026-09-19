@@ -90,6 +90,50 @@ def newest_plausible_date() -> date:
     """
     return date.today() - timedelta(days=_latency_days())
 
+
+def newest_available_date() -> date:
+    """Newest calendar date with servable data, across local stores.
+
+    Ground truth, not latency math: the newest date (<= newest_plausible_date)
+    covered by the Zarr field store or the kerchunk manifest. The /ask
+    dateless-question clamp uses this so plans always point at a date
+    /grid can actually serve -- the latency edge alone can overshoot the
+    index when the builder last ran before the archive's newest granule.
+
+    Falls back to newest_plausible_date() when neither store reports
+    anything; /grid then fails honestly (501/422) as before. Never raises:
+    the clamp must not break /ask.
+    """
+    plausible = newest_plausible_date()
+    newest: date | None = None
+
+    def consider(day: date) -> None:
+        nonlocal newest
+        if day <= plausible and (newest is None or day > newest):
+            newest = day
+
+    # Zarr daily-mean store: union coverage across canonical variables.
+    if fields_store.available():
+        for var in MERRA2_COLUMN_VARIABLES:
+            for d in fields_store.coverage(var):
+                try:
+                    consider(date.fromisoformat(d))
+                except ValueError:
+                    continue
+
+    # Kerchunk manifest: ISO-date keys into per-granule reference files.
+    try:
+        manifest = _load_manifest(_index_path())
+    except Exception:  # missing/corrupt manifest reads as no coverage
+        manifest = {}
+    for key in manifest.get("files", {}):
+        try:
+            consider(date.fromisoformat(key))
+        except ValueError:
+            continue
+
+    return newest if newest is not None else plausible
+
 DEFAULT_INDEX_PATH = str(
     Path(__file__).resolve().parent.parent / "data" / "kerchunk" / "index.json"
 )

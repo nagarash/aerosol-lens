@@ -534,6 +534,55 @@ def test_kerchunk_index_helpers():
 
 
 # ---------------------------------------------------------------------------
+# newest_available_date: the /ask dateless clamp must point at dates that
+# actually have data (field store or manifest), not just the latency edge.
+
+
+def test_newest_available_date_uses_manifest_coverage():
+    """Clamp target = newest manifest date, not the latency edge.
+
+    Regression: the clamp used newest_plausible_date() (today - 45d =
+    2026-08-05) while the on-server index stopped at 2026-08-01, so
+    /ask produced plans /grid could not serve.
+    """
+    from backend.grid import newest_available_date
+
+    with grid_harness():
+        assert newest_available_date() == date(2026, 9, 2)
+
+
+def test_newest_available_date_caps_at_plausible_edge():
+    """Coverage newer than the archive edge must not win the clamp."""
+    from backend.grid import newest_available_date, newest_plausible_date
+
+    with grid_harness():
+        os.environ["MERRA2_LATENCY_DAYS"] = "365"  # plausible << fixture days
+        try:
+            assert newest_available_date() == newest_plausible_date()
+        finally:
+            os.environ["MERRA2_LATENCY_DAYS"] = "0"
+
+
+def test_newest_available_date_falls_back_when_no_stores():
+    """No manifest and no field store -> the latency edge, never an error."""
+    from backend.grid import newest_available_date, newest_plausible_date
+
+    saved = {k: os.environ.get(k) for k in ("KERCHUNK_INDEX_PATH", "FIELDS_DIR")}
+    os.environ["KERCHUNK_INDEX_PATH"] = "/nonexistent/index.json"
+    os.environ["FIELDS_DIR"] = "/nonexistent/fields"
+    grid_module._load_manifest.cache_clear()
+    try:
+        assert newest_available_date() == newest_plausible_date()
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        grid_module._load_manifest.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # Runner (works without pytest)
 
 
