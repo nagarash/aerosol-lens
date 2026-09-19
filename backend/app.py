@@ -264,14 +264,18 @@ def admin_backfill(req: BackfillRequest, request: Request) -> dict:
         start, end = backfill.resolve_range(req.start, req.end)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Day downloads are latency-bound (thousands of small HTTPS range
+    # reads per day), so a few parallel workers give a near-linear
+    # speedup; Zarr writes stay serial inside backfill_range.
+    workers = int(os.environ.get("BACKFILL_WORKERS", "4"))
     thread = threading.Thread(
         target=backfill.backfill_range,
-        kwargs={"start": start, "end": end},
+        kwargs={"start": start, "end": end, "workers": workers},
         name="fields-backfill",
         daemon=True,
     )
     thread.start()
-    log.info("admin: backfill started %s..%s", start, end)
+    log.info("admin: backfill started %s..%s (%d workers)", start, end, workers)
     return {"started": True, "start": start.isoformat(), "end": end.isoformat(),
             "total_days": (end - start).days + 1}
 

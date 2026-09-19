@@ -543,8 +543,9 @@ def test_admin_starts_backfill_and_409_while_running():
 
     started = {}
 
-    def fake_range(start=None, end=None, reader=None):
+    def fake_range(start=None, end=None, reader=None, **kwargs):
         started["args"] = (start, end)
+        started["kwargs"] = kwargs
 
     orig_range, orig_running = bf.backfill_range, bf.is_running
     bf.backfill_range = fake_range
@@ -611,3 +612,61 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+def test_backfill_parallel_workers_match_sequential():
+    from backend import backfill
+    with temp_store():
+        calls: list = []
+        reader = _fake_reader_factory(calls)
+        status = backfill.backfill_range("2026-08-01", "2026-08-04",
+                                         reader=reader, workers=3)
+        assert status["done_days"] == 4 and not status["errors"]
+        assert sorted(calls) == ["2026-08-01", "2026-08-02",
+                                 "2026-08-03", "2026-08-04"]
+        for v in MERRA2_COLUMN_VARIABLES:
+            assert fields.coverage(v) == {"2026-08-01", "2026-08-02",
+                                          "2026-08-03", "2026-08-04"}
+        assert not backfill.is_running()
+
+
+def test_backfill_parallel_records_errors_and_continues():
+    from backend import backfill
+    with temp_store():
+        calls: list = []
+        reader = _fake_reader_factory(calls, fail_on={"2026-08-02"})
+        status = backfill.backfill_range("2026-08-01", "2026-08-03",
+                                         reader=reader, workers=2)
+        assert status["done_days"] == 3
+        assert len(status["errors"]) == 1
+        assert status["errors"][0]["date"] == "2026-08-02"
+
+
+def test_backfill_retry_then_gives_up_on_permanent_failure():
+    from backend import backfill
+    attempts: list = []
+    def reader(d):
+        attempts.append(d.isoformat())
+        raise FileNotFoundError(f"no granule for {d}")  # permanent: no retry
+    with temp_store():
+        status = backfill.backfill_range("2026-08-01", "2026-08-01",
+                                         reader=reader, workers=1)
+        assert attempts == ["2026-08-01"]  # failed fast, no retries
+        assert len(status["errors"]) == 1
+
+
+def test_backfill_retries_transient_failure():
+    import unittest.mock
+    from backend import backfill
+    attempts: list = []
+    def reader(d):
+        attempts.append(d.isoformat())
+        if len(attempts) < 3:
+            raise TimeoutError("connection timed out")  # transient
+        return {v: synthetic_day(1) for v in sorted(MERRA2_COLUMN_VARIABLES)}
+    with temp_store(), unittest.mock.patch("time.sleep"):
+        status = backfill.backfill_range("2026-08-01", "2026-08-01",
+                                         reader=reader, workers=1)
+        assert len(attempts) == 3
+        assert not status["errors"]
+        assert fields.coverage("DUEXTTAU") == {"2026-08-01"}

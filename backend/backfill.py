@@ -226,9 +226,68 @@ def _record_error(d: date, exc: Exception) -> None:
 # The backfill itself
 
 
+def _is_transient(exc: Exception) -> bool:
+    """Best-effort check for retryable network/rate-limit failures.
+
+    A missing granule (404 -> FileNotFoundError) is permanent: retrying
+    won't help. Throttling (429), bad-gateway class errors, and dropped
+    connections are worth another attempt.
+    """
+    if isinstance(exc, FileNotFoundError):
+        return False
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in (429, 500, 502, 503, 504):
+        return True
+    if type(exc).__name__ in (
+        "ConnectionError", "ConnectTimeout", "ReadTimeout", "Timeout",
+        "ChunkedEncodingError", "RemoteDisconnected",
+    ):
+        return True
+    msg = str(exc).lower()
+    return any(s in msg for s in (
+        "429", "503", "504", "rate limit", "too many requests",
+        "timeout", "timed out", "connection reset",
+        "temporarily unavailable", "service unavailable",
+    ))
+
+
+def _read_with_retry(read, d: date, attempts: int = 3):
+    """Read one day's means, retrying transient failures with backoff.
+
+    Returns (means, elapsed_seconds). Permanent failures raise immediately.
+    """
+    t0 = time.monotonic()
+    last: Exception | None = None
+    for i in range(attempts):
+        try:
+            means = read(d)
+            return means, time.monotonic() - t0
+        except Exception as exc:  # noqa: BLE001 - recorded per day below
+            last = exc
+            if not _is_transient(exc) or i == attempts - 1:
+                raise
+            wait = 5 * (2 ** i)
+            log.warning("backfill: %s transient failure (%s), "
+                        "retry %d/%d in %ds",
+                        d, exc, i + 1, attempts - 1, wait)
+            time.sleep(wait)
+    raise last  # unreachable; keeps type checkers honest
+
+
+def _store_day(d: date, needed: list, means: dict, elapsed: float) -> None:
+    """Append one downloaded day to the field store (call on one thread)."""
+    nbytes = 0
+    for var in needed:
+        arr = means[var]
+        fields_store.append_day(var, d.isoformat(), arr)
+        nbytes += getattr(arr, "nbytes", 0)
+    log.info("backfill: %s done in %.1fs (+%.1f MB, %s)",
+             d, elapsed, nbytes / 1e6, ",".join(needed))
+
+
 def backfill_range(start: date | str | None = None,
                    end: date | str | None = None,
-                   reader=None) -> dict:
+                   reader=None, workers: int = 1) -> dict:
     """Backfill daily means for [start, end] into the field store.
 
     `reader(d)` returns {var: (361, 576) float32}; defaults to
@@ -236,7 +295,14 @@ def backfill_range(start: date | str | None = None,
     present for ALL canonical variables are skipped without reading.
     Per-day failures are recorded in status["errors"] and the run
     continues. Returns the final status dict.
+
+    `workers` parallelizes the day downloads (I/O-bound threads); the
+    Zarr writes still happen serially on the calling thread, so the
+    store never sees concurrent writers. workers=1 keeps the original
+    strictly sequential behavior.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     s, e = resolve_range(start, end)
     read = reader or read_day_means
     days = []
@@ -245,36 +311,54 @@ def backfill_range(start: date | str | None = None,
         days.append(d)
         d += timedelta(days=1)
 
-    _set_status(running=True, total_days=len(days), done_days=0,
+    # Coverage check up front (cheap, local): only days missing at least
+    # one variable get a download slot.
+    todo: list = []
+    for d in days:
+        needed = [v for v in sorted(MERRA2_COLUMN_VARIABLES)
+                  if d.isoformat() not in fields_store.coverage(v)]
+        if not needed:
+            log.info("backfill: %s skip (already stored)", d)
+        else:
+            todo.append((d, needed))
+
+    _set_status(running=True, total_days=len(days),
+                done_days=len(days) - len(todo),
                 current_date=None, errors=[])
-    log.info("backfill: %s..%s (%d days) -> %s",
-             s, e, len(days), fields_store.fields_dir())
-    done = 0
+    log.info("backfill: %s..%s (%d days, %d to fetch, %d workers) -> %s",
+             s, e, len(days), len(todo), workers,
+             fields_store.fields_dir())
+    done = len(days) - len(todo)
     try:
-        for d in days:
-            _set_status(current_date=d.isoformat())
-            t0 = time.monotonic()
-            try:
-                needed = [v for v in sorted(MERRA2_COLUMN_VARIABLES)
-                          if d.isoformat() not in fields_store.coverage(v)]
-                if not needed:
-                    log.info("backfill: %s skip (already stored)", d)
-                else:
-                    means = read(d)
-                    nbytes = 0
-                    for var in needed:
-                        arr = means[var]
-                        fields_store.append_day(var, d.isoformat(), arr)
-                        nbytes += getattr(arr, "nbytes", 0)
-                    elapsed = time.monotonic() - t0
-                    log.info("backfill: %s done in %.1fs (+%.1f MB, %s)",
-                             d, elapsed, nbytes / 1e6, ",".join(needed))
-            except Exception as exc:  # per-day failure: record and continue
-                log.warning("backfill: %s FAILED: %s: %s",
-                            d, type(exc).__name__, exc)
-                _record_error(d, exc)
-            done += 1
-            _set_status(done_days=done)
+        if workers <= 1 or len(todo) <= 1:
+            for d, needed in todo:
+                _set_status(current_date=d.isoformat())
+                try:
+                    means, elapsed = _read_with_retry(read, d)
+                    _store_day(d, needed, means, elapsed)
+                except Exception as exc:  # per-day failure: record, continue
+                    log.warning("backfill: %s FAILED: %s: %s",
+                                d, type(exc).__name__, exc)
+                    _record_error(d, exc)
+                done += 1
+                _set_status(done_days=done)
+        else:
+            with ThreadPoolExecutor(max_workers=workers,
+                                    thread_name_prefix="backfill") as ex:
+                futs = {ex.submit(_read_with_retry, read, d): (d, needed)
+                        for d, needed in todo}
+                for fut in as_completed(futs):
+                    d, needed = futs[fut]
+                    try:
+                        means, elapsed = fut.result()
+                    except Exception as exc:  # per-day failure: record, continue
+                        log.warning("backfill: %s FAILED: %s: %s",
+                                    d, type(exc).__name__, exc)
+                        _record_error(d, exc)
+                    else:
+                        _store_day(d, needed, means, elapsed)
+                    done += 1
+                    _set_status(done_days=done, current_date=d.isoformat())
     finally:
         _set_status(running=False, current_date=None)
     status = get_status()
