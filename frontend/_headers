@@ -1,0 +1,4 @@
+# Never cache the HTML shell: the JS bundle filename changes
+# every release, so a fresh index.html is all a client needs.
+/index.html
+  Cache-Control: no-store
