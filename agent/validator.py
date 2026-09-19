@@ -73,27 +73,19 @@ def _check_level_variable_consistency(plan: QueryPlan) -> None:
 def _check_source_level_consistency(plan: QueryPlan) -> None:
     """GUARDRAIL: the source must be able to serve the plan's level.
 
-    - google = Google Air Quality API, surface PM2.5 only (frontend calls it
-      directly). It has no column/AOD data of any kind.
     - merra2 = MERRA-2 reanalysis, column AOD only (speciated aerosols).
     - cams = CAMS EAC4 reanalysis, historical surface PM2.5/PM10 only.
+    The Google Air Quality source was removed from this build: it is no
+    longer in the Source schema, so no plan can select it. (If a draft
+    ever carries source="google", schema validation rejects it before
+    this check runs.)
     A plume/column question about "today" must still use merra2 -- recency
     never overrides the level.
     """
-    if plan.source == "google":
-        if plan.level != "surface":
-            raise ValidationError(
-                f"source='google' serves surface data only, got level={plan.level!r}. "
-                "Column/plume questions must use source='merra2'."
-            )
-        if plan.variable != "PM25":
-            raise ValidationError(
-                f"source='google' serves PM2.5 only, got variable={plan.variable!r}."
-            )
     if plan.source == "merra2" and plan.level != "column":
         raise ValidationError(
             f"source='merra2' serves column AOD only, got level={plan.level!r}. "
-            "Surface questions must use source='google' (recent) or 'cams' (historical)."
+            "There is no surface source in this build."
         )
     if plan.source == "cams" and plan.level != "surface":
         raise ValidationError(

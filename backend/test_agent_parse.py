@@ -159,26 +159,35 @@ def expect_http(status, fn):
 # Tests
 
 
-def test_health_question_produces_surface_plan():
+def test_health_question_returns_422_surface_unavailable():
+    """Health intents are refused: no surface source exists in this build
+    (Google removed, CAMS unbuilt). Must never answer with column data."""
     with harness([health_draft()]) as fake:
-        resp = ask(
-            AskRequest(
-                question="is it safe to run in Delhi today", reference_date=REF
-            )
+        exc = expect_http(
+            422,
+            lambda: ask(
+                AskRequest(
+                    question="is it safe to run in Delhi today", reference_date=REF
+                )
+            ),
         )
-    assert resp.plan.intent == "health"
-    assert resp.plan.level == "surface", "health questions must be surface-level"
-    assert resp.plan.variable == "PM25"
-    assert resp.plan.source == "google"
-    assert resp.plan.bbox == DELHI_BBOX, f"bbox came from gazetteer, got {resp.plan.bbox}"
-    assert resp.plan.place_name == "Delhi"
-    assert resp.cached is False
-    assert resp.data_url.startswith("google://")
-    assert resp.legend["units"] == "µg/m³"
-    # structured-output contract with the model
-    assert fake.calls[0]["response_format"] == {"type": "json_object"}
-    assert fake.calls[0]["model"] == "mock/mock-model"
-    assert fake.calls[0]["temperature"] == 0
+    assert "surface" in exc.detail, f"422 must explain the gap: {exc.detail}"
+    assert len(fake.calls) == 1, "refusal must not consume the retry"
+
+
+def test_surface_unavailable_error_code_returns_422():
+    """The new prompt's refusal escape hatch -> same clean 422."""
+    with harness([json.dumps({"error": "surface_unavailable"})]) as fake:
+        exc = expect_http(
+            422,
+            lambda: ask(
+                AskRequest(
+                    question="is it safe to run in Delhi today", reference_date=REF
+                )
+            ),
+        )
+    assert "surface" in exc.detail
+    assert len(fake.calls) == 1
 
 
 def test_plume_question_produces_column_plan():
@@ -198,30 +207,45 @@ def test_plume_question_produces_column_plan():
     assert resp.data_url.startswith("/grid?source=merra2")
     assert "DUEXTTAU" in resp.data_url
     assert len(fake.calls) == 1
+    # structured-output contract with the model
+    assert fake.calls[0]["response_format"] == {"type": "json_object"}
+    assert fake.calls[0]["model"] == "mock/mock-model"
+    assert fake.calls[0]["temperature"] == 0
 
 
 def test_cache_hit_avoids_second_model_call():
-    with harness([health_draft()]) as fake:
+    with harness([plume_draft()]) as fake:
         r1 = ask(
-            AskRequest(question="is it safe to run in Delhi today", reference_date=REF)
+            AskRequest(
+                question="show me Saharan dust over the Atlantic last week",
+                reference_date=REF,
+            )
         )
         assert r1.cached is False
         # same question, different casing/punctuation -> same normalized key
         r2 = ask(
-            AskRequest(question="Is it safe to run in Delhi today?!", reference_date=REF)
+            AskRequest(
+                question="Show me Saharan dust over the Atlantic last week?!",
+                reference_date=REF,
+            )
         )
         assert r2.cached is True
-        assert r2.plan.bbox == DELHI_BBOX
+        assert r2.plan.bbox == SAHARA_BBOX
         assert len(fake.calls) == 1, "cache hit must not call the model again"
 
 
 def test_cache_scope_separates_reference_dates():
-    with harness([health_draft(), health_draft()]) as fake:
-        ask(AskRequest(question="is it safe to run in Delhi today", reference_date=REF))
+    with harness([plume_draft(), plume_draft()]) as fake:
+        ask(
+            AskRequest(
+                question="show me Saharan dust over the Atlantic last week",
+                reference_date=REF,
+            )
+        )
         # same words, different day -> different plan, must NOT hit the cache
         r = ask(
             AskRequest(
-                question="is it safe to run in Delhi today",
+                question="show me Saharan dust over the Atlantic last week",
                 reference_date="2026-10-11",
             )
         )
@@ -229,22 +253,34 @@ def test_cache_scope_separates_reference_dates():
         assert len(fake.calls) == 2
 
 
+def bad_window_draft():
+    """Deterministic validation failure: a 3-year window with daily
+    aggregation exceeds the validator's 62-day daily limit."""
+    d = json.loads(plume_draft())
+    d["time_start"] = "2020-01-01T00:00:00Z"
+    d["time_end"] = "2023-01-01T00:00:00Z"
+    return json.dumps(d)
+
+
 def test_invalid_output_triggers_single_retry():
-    with harness([bad_health_column_draft(), health_draft()]) as fake:
+    with harness([bad_window_draft(), plume_draft()]) as fake:
         resp = ask(
-            AskRequest(question="is it safe to run in Delhi today", reference_date=REF)
+            AskRequest(
+                question="show me Saharan dust over the Atlantic last week",
+                reference_date=REF,
+            )
         )
-    assert resp.plan.level == "surface"
-    assert resp.plan.variable == "PM25"
+    assert resp.plan.intent == "plume"
+    assert resp.plan.variable == "DUEXTTAU"
     assert len(fake.calls) == 2, "exactly one retry expected"
     retry_msg = fake.calls[1]["messages"][-1]["content"]
-    assert "health" in retry_msg and "surface" in retry_msg, (
-        "retry must carry the validation error"
-    )
+    assert "exceeds" in retry_msg, "retry must carry the validation error"
 
 
-def test_double_invalid_raises_422():
-    with harness([bad_health_column_draft(), bad_health_column_draft()]):
+def test_health_plan_rejected_without_retry():
+    """A health draft fails immediately with the surface-unavailable 422
+    (PlanRejectedError is not retryable), without calling the model twice."""
+    with harness([bad_health_column_draft()]) as fake:
         exc = expect_http(
             422,
             lambda: ask(
@@ -254,6 +290,7 @@ def test_double_invalid_raises_422():
             ),
         )
     assert "health" in exc.detail
+    assert len(fake.calls) == 1, "health refusal must not consume the retry"
 
 
 def test_unknown_place_returns_422_naming_place():
@@ -272,9 +309,11 @@ def test_unknown_place_returns_422_naming_place():
 
 
 def test_place_alias_resolves():
-    with harness([health_draft(place="New Delhi")]):
+    with harness([plume_draft(place="New Delhi")]):
         resp = ask(
-            AskRequest(question="is it safe to run in New Delhi today", reference_date=REF)
+            AskRequest(
+                question="show dust over New Delhi last week", reference_date=REF
+            )
         )
     assert resp.plan.place_name == "Delhi"
     assert resp.plan.bbox == DELHI_BBOX

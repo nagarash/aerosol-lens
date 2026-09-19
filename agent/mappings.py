@@ -64,8 +64,9 @@ def canonical_variable(name: str) -> str:
 
 # Default source/level/aggregation per intent. The agent may override the
 # source when the time window demands it (see SOURCE_TIME_RULES below).
+# "health" has no entry: health intents are unservable in this build (no
+# surface source -- Google removed, CAMS unbuilt) and are refused outright.
 INTENT_DEFAULTS: dict[str, IntentDefaults] = {
-    "health": {"level": "surface", "source": "google", "aggregation": "hourly"},
     "plume": {"level": "column", "source": "merra2", "aggregation": "daily"},
     "comparison": {"level": "surface", "source": "cams", "aggregation": "daily"},
 }
@@ -73,15 +74,14 @@ INTENT_DEFAULTS: dict[str, IntentDefaults] = {
 # Time-based source routing. The agent applies these BEFORE emitting a plan.
 # LEVEL DECIDES FIRST -- recency never overrides it:
 # - level='column' (plume tracking, or "what kind of aerosol"): source='merra2',
-#   ALWAYS, even for "today". Google has no column/AOD data.
-# - level='surface' and the question is about now, today, the coming days, or
-#   the last 30 days: source='google' (live/forecast/history PM2.5; the
-#   frontend calls the API directly).
-# - level='surface' and older than 30 days: source='cams' (EAC4 reanalysis).
+#   ALWAYS, even for "today". MERRA-2 is the only servable source.
+# - level='surface', older than 30 days: source='cams' (EAC4 reanalysis).
+# The Google Air Quality source no longer exists in this build. NEVER emit
+# source="google"; health questions return {"error": "surface_unavailable"}.
 SOURCE_TIME_RULES = """
-- If level='column' (plume, or the question asks what KIND of aerosol -- dust vs smoke vs sulfate): source='merra2', regardless of date. Google has no column data.
-- Else if the question is about now, today, the coming days, or the last 30 days: source='google'.
-- Else (surface, older than 30 days): source='cams' (historical surface PM2.5/PM10).
+- If level='column' (plume, or the question asks what KIND of aerosol -- dust vs smoke vs sulfate): source='merra2', regardless of date. MERRA-2 is the only servable source.
+- Historical surface questions (PM2.5/PM10, older periods): source='cams'.
+- NEVER emit source="google": the Google Air Quality path was removed from this build. Health questions are answered with {"error": "surface_unavailable"}.
 """
 
 # WHO guideline values (ug/m^3) used by the 'exceedance' view mode.

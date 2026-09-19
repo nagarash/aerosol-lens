@@ -24,6 +24,8 @@ _GAZETTEER_PATH = (
 # model is instructed to prefer canonical names, this is the safety net.
 _ALIASES: dict[str, str] = {
     "sahara desert": "Sahara",
+    "saharan": "Sahara",
+    "saharan dust": "Sahara",
     "new delhi": "Delhi",
     "la": "Los Angeles",
     "los angeles ca": "Los Angeles",
@@ -71,6 +73,15 @@ def _lookup() -> dict[str, tuple[str, list[float]]]:
         if canonical in _load():
             table[alias] = (canonical, _load()[canonical])
     return table
+
+
+def name_variants() -> dict[str, str]:
+    """All matchable place names: lowercased variant -> canonical name.
+
+    Used by the deterministic longest-match place extraction
+    (backend/jev.py). Covers gazetteer canonical names and aliases.
+    """
+    return {variant: canonical for variant, (canonical, _bbox) in _lookup().items()}
 
 
 def known_places() -> list[str]:

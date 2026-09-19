@@ -20,7 +20,7 @@ Plan draft schema:
 {
   "intent": "health" | "plume" | "comparison",
   "level": "surface" | "column",
-  "source": "google" | "merra2" | "cams",
+  "source": "merra2" | "cams",
   "variable": "PM25" | "PM10" | "DUEXTTAU" | "BCEXTTAU" | "OCEXTTAU" | "SUEXTTAU" | "SSEXTTAU" | "TOTEXTTAU",
   "place": "place name, e.g. 'Delhi', 'Sahara', 'US Midwest'",
   "time_start": "YYYY-MM-DDTHH:MM:SSZ",
@@ -31,8 +31,11 @@ Plan draft schema:
 }
 
 Intent rules:
-- "health": the user asks if air is safe to breathe, about running/exercising
-  outside, allergies, sensitive groups, AQI. ALWAYS level="surface".
+- "health": UNAVAILABLE in this build -- there is no surface data source
+  (the Google Air Quality path was removed and CAMS is not wired up).
+  When the user asks a health question ("is it safe to breathe", running
+  outside, allergies, AQI), return {"error": "surface_unavailable"} and
+  nothing else. NEVER answer a health question with column data.
 - "plume": the user asks to see/track/show a dust storm, smoke plume, ash
   cloud, haze event, "what is that brown cloud". Prefers level="column".
 - "comparison": the user compares two periods or events ("vs last year",

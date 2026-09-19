@@ -14,7 +14,9 @@ from .mappings import canonical_variable
 
 Intent = Literal["health", "plume", "comparison"]
 Level = Literal["surface", "column"]
-Source = Literal["google", "merra2", "cams"]
+# NOTE: "google" was removed from the Source type when the Google Air
+# Quality path was dropped from the product. No plan can select it.
+Source = Literal["merra2", "cams"]
 Aggregation = Literal["hourly", "daily", "monthly_mean"]
 ViewMode = Literal["continuous", "exceedance"]
 
@@ -54,8 +56,7 @@ class QueryPlan(BaseModel):
         "'column' = column-integrated AOD (plume tracking)."
     )
     source: Source = Field(
-        description="'google' = live/forecast/<=30d history (frontend calls directly); "
-        "'merra2' = historical archive, incl. speciated column AOD; "
+        description="'merra2' = historical archive, incl. speciated column AOD; "
         "'cams' = historical surface PM2.5/PM10."
     )
     variable: str = Field(

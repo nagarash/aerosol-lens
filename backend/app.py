@@ -1,22 +1,24 @@
 """Aerosol Lens backend: FastAPI service.
 
 Pipeline per question:
-    POST /ask  ->  cache? -> agent parse (LiteLLM) -> geocode place
-                -> validate_plan() -> build data URLs + legend + caption
-                -> JSON response
+    POST /ask -> cache? -> Jev fast path (TypeSafe Jev classifier +
+                deterministic place/time extraction) -> LLM fallback ->
+                geocode place -> validate_plan() -> build data URLs +
+                legend + caption -> JSON response
 
 The agent's only job is translation: it emits a QueryPlanDraft (place
 NAME, never coordinates). Deterministic code resolves the place via the
 local gazetteer and validates the plan before anything executes.
 
 Data paths:
-- source="google": the FRONTEND calls the Google Air Quality API directly
-  with the user's own key. The backend only returns which endpoint/tile
-  template to use. We never proxy the key.
 - source="merra2": backend serves grid slices via kerchunk byte-range reads
-  (GET /grid). TODO: wire kerchunk_index.py output + xarray here.
+  (GET /grid). Every plan routes to MERRA-2 column aerosol data.
 - source="cams": historical surface PM2.5. TODO: pick an access path
   (CAMS ADS API) and implement the fetcher.
+
+There is no surface source in this build: the Google Air Quality path was
+removed and CAMS is not wired up, so health intents are refused with a
+clean 422 rather than answered with column data.
 """
 
 from __future__ import annotations
@@ -24,6 +26,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
+import threading
 import time
 from datetime import datetime, timezone
 from urllib.parse import urlencode
@@ -36,16 +40,17 @@ logging.basicConfig(
 )
 log = logging.getLogger("aerosol-lens")
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError as PydanticValidationError
 from starlette.responses import JSONResponse
 
 from agent.prompts import SYSTEM_PROMPT, build_user_message
-from agent.query_plan import QueryPlan, QueryPlanDraft
+from agent.query_plan import QueryPlan, QueryPlanDraft, StyleSpec
 from agent.validator import ValidationError, validate_plan
+from agent.mappings import MERRA2_COLUMN_VARIABLES, canonical_variable
 
-from . import rate_limit
+from . import jev, rate_limit
 from .cache import PlanCache
 from .earthdata_auth import EarthdataExchangeError, EarthdataTokenMissingError
 from .geocode import UnknownPlaceError, known_places_hint, resolve_place
@@ -217,6 +222,70 @@ def healthz() -> dict:
     }
 
 
+# --------------------------------------------------------------------------
+# Admin: field-store backfill. Bearer-token auth; the endpoints do not
+# exist at all (404) when ADMIN_TOKEN is unset, so a forgotten secret
+# fails closed instead of leaving an open trigger.
+
+
+class BackfillRequest(BaseModel):
+    start: str | None = None  # YYYY-MM-DD; defaults to a year of archive
+    end: str | None = None    # YYYY-MM-DD; defaults to the archive edge
+
+
+def _require_admin(request: Request) -> None:
+    token = os.environ.get("ADMIN_TOKEN", "").strip()
+    if not token:
+        # Fail closed: without a configured token there is no admin
+        # surface to probe.
+        raise HTTPException(status_code=404, detail="not found")
+    presented = request.headers.get("authorization", "")
+    if not secrets.compare_digest(presented, f"Bearer {token}"):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+
+@app.post("/admin/backfill")
+def admin_backfill(req: BackfillRequest, request: Request) -> dict:
+    """Start a field-store backfill in a background thread.
+
+    Only one backfill runs at a time; a second call while one is
+    running returns 409 with the live status.
+    """
+    from . import backfill
+
+    _require_admin(request)
+    if backfill.is_running():
+        raise HTTPException(
+            status_code=409,
+            detail={"message": "a backfill is already running",
+                    "status": backfill.get_status()},
+        )
+    try:
+        start, end = backfill.resolve_range(req.start, req.end)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    thread = threading.Thread(
+        target=backfill.backfill_range,
+        kwargs={"start": start, "end": end},
+        name="fields-backfill",
+        daemon=True,
+    )
+    thread.start()
+    log.info("admin: backfill started %s..%s", start, end)
+    return {"started": True, "start": start.isoformat(), "end": end.isoformat(),
+            "total_days": (end - start).days + 1}
+
+
+@app.get("/admin/backfill/status")
+def admin_backfill_status(request: Request) -> dict:
+    """Live backfill progress: {running, total_days, done_days,
+    current_date, errors[]}."""
+    from . import backfill
+
+    _require_admin(request)
+    return backfill.get_status()
+
+
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     question = req.question.strip()
@@ -266,17 +335,98 @@ def ask(req: AskRequest) -> AskResponse:
     return AskResponse(plan=plan, data_url=data_url, legend=legend, cached=was_cached)
 
 
+def _jev_enabled() -> bool:
+    """Fast path kill switch: JEV_ENABLED=0 disables the Jev classifier."""
+    return os.environ.get("JEV_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _parse_with_jev(question: str, reference_date: str) -> QueryPlan | None:
+    """Fast path: Jev classification + deterministic place/time extraction.
+
+    Returns a validated QueryPlan, or None when the LLM path should take
+    over (low confidence, no resolvable place). Raises PlanRejectedError
+    for confident health intents -- there is no surface source in this
+    build, so health gets an honest 422, never column data as an answer.
+    Raises JevError (or anything else) on Jev failure; the caller treats
+    that as "use the LLM path".
+    """
+    result = jev.classify_question(question)
+    log.info("ask: jev classification: %s", result.summary())
+    if not result.confident:
+        log.info("ask: jev not confident; falling back to LLM path")
+        return None
+    if result.intent == "health":
+        raise PlanRejectedError(_HEALTH_UNAVAILABLE_MSG)
+    var = canonical_variable(result.variable)
+    if var not in MERRA2_COLUMN_VARIABLES:
+        log.info(
+            "ask: jev variable %r not servable; falling back to LLM path",
+            result.variable,
+        )
+        return None
+    place_name = jev.extract_place(question)
+    if place_name is None:
+        log.info("ask: jev path found no gazetteer place; falling back to LLM path")
+        return None
+    window = jev.extract_time(question, reference_date)
+    # Every plan routes to MERRA-2 column data: level/source are fixed, not
+    # model outputs. Style is the same aod_sequential used for plume views.
+    draft = QueryPlanDraft(
+        intent=result.intent,
+        level="column",
+        source="merra2",
+        variable=var,
+        place=place_name,
+        time_start=window.start,
+        time_end=window.end,
+        aggregation=result.aggregation,
+        style=StyleSpec(colormap="aod_sequential", mode="continuous", opacity=0.65),
+        caption=None,
+    )
+    canonical_name, bbox = resolve_place(place_name)
+    return validate_plan(QueryPlan.from_draft(draft, bbox=bbox, place_name=canonical_name))
+
+
+_HEALTH_UNAVAILABLE_MSG = (
+    "health-related questions need surface air-quality data, which "
+    "isn't available in this build"
+)
+
+
 def _parse_with_agent(
     question: str, reference_date: str, user_location: str | None
 ) -> QueryPlan:
-    """Translate a question into a validated QueryPlan via the LLM.
+    """Translate a question into a validated QueryPlan.
 
-    Flow: model emits a QueryPlanDraft (place NAME, never coordinates) ->
-    backend resolves the place via the local gazetteer -> QueryPlan ->
-    deterministic validate_plan(). On any failure the model gets exactly
-    ONE retry with the error message appended; after that we fail honestly.
-    No silent fallback plans, ever.
+    Fast path first: the TypeSafe Jev classifier decides intent/variable/
+    aggregation (~100-500ms) while place and time are extracted
+    deterministically. Confident, fully-resolved plans return directly.
+    Anything missing (low confidence, no place/time) falls back to the
+    LLM path below, which is unchanged. Jev failures are logged and never
+    break /ask.
+
+    Flow: Jev classification -> deterministic extraction -> geocode ->
+    validate_plan(); or: model emits a QueryPlanDraft (place NAME, never
+    coordinates) -> backend resolves the place via the local gazetteer ->
+    QueryPlan -> deterministic validate_plan(). On any LLM failure the
+    model gets exactly ONE retry with the error message appended; after
+    that we fail honestly. No silent fallback plans, ever.
+
+    Health questions are refused with a 422 (no surface source in this
+    build: Google removed, CAMS unbuilt) -- never answered with column
+    data. source="google" can no longer be selected at all.
     """
+    if _jev_enabled():
+        try:
+            plan = _parse_with_jev(question, reference_date)
+        except PlanRejectedError:
+            raise  # deliberate refusal (e.g. health intent): 422, no LLM fallback
+        except Exception as exc:  # noqa: BLE001 -- JevError or anything unexpected
+            log.warning("ask: jev fast path failed (%r); falling back to LLM path", exc)
+            plan = None
+        if plan is not None:
+            return plan
+        log.info("ask: jev fast path declined; using LLM path")
     model = _require_llm()
     messages: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT + "\n" + known_places_hint()},
@@ -366,16 +516,26 @@ def _draft_from_model(model: str, messages: list[dict]) -> QueryPlanDraft | None
         raise ValueError(f"model must return a JSON object, got: {content[:200]!r}")
     if data.get("error") == "need_location":
         return None
+    if data.get("error") == "surface_unavailable":
+        raise PlanRejectedError(_HEALTH_UNAVAILABLE_MSG)
+    # Product refusals, checked on the raw dict so the model gets a clear
+    # 422 instead of a schema retry: health intents have no servable source
+    # in this build (Google removed, CAMS unbuilt), and source="google"
+    # no longer exists in the schema at all.
+    if data.get("intent") == "health":
+        raise PlanRejectedError(_HEALTH_UNAVAILABLE_MSG)
+    if data.get("source") == "google":
+        raise PlanRejectedError("the Google Air Quality source was removed from this build")
     return QueryPlanDraft.model_validate(data)
 
 
 def _data_url_for(plan: QueryPlan) -> str:
-    """Return the URL template the frontend should render for this plan."""
-    if plan.source == "google":
-        # The frontend calls Google directly with the user's key; we only
-        # tell it which tile template to use. Never proxy the API key.
-        # e.g. https://airquality.googleapis.com/v1/mapTypes/UAQI_RED_GREEN/heatmapTiles/{z}/{x}/{y}?key=USER_KEY
-        return "google://heatmapTiles/{z}/{x}/{y}"
+    """Return the URL template the frontend should render for this plan.
+
+    Google no longer exists in this build: no plan can carry
+    source="google" (it is not in the Source schema), and this function
+    has no branch for it.
+    """
     if plan.source == "merra2":
         w, s, e, n = plan.bbox
         # Build via urlencode, not an f-string: time_start/end are UTC-aware
