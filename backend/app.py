@@ -29,7 +29,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 # Structured request logging. On Fly.io, stdout is captured by `fly logs`.
@@ -321,6 +321,8 @@ def ask(req: AskRequest) -> AskResponse:
         plan_cache.put(question, plan, scope=scope)
         was_cached = False
 
+    plan = _clamp_dateless_window(question, reference_date, plan)
+
     data_url = _data_url_for(plan)
     legend = _legend_for(plan)
     if not plan.caption:
@@ -338,6 +340,27 @@ def ask(req: AskRequest) -> AskResponse:
 def _jev_enabled() -> bool:
     """Fast path kill switch: JEV_ENABLED=0 disables the Jev classifier."""
     return os.environ.get("JEV_ENABLED", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _clamp_dateless_window(question: str, reference_date: str, plan: QueryPlan) -> QueryPlan:
+    """Dateless questions mean "latest available", not today.
+
+    The MERRA-2 archive runs ~MERRA2_LATENCY_DAYS behind real time, so a
+    default-to-today window would 422 at the /grid latency gate. When the
+    question carries no time expression, clamp the window to the newest
+    plausible granule date. Explicit dates (including "today") are never
+    touched: asking for a day with no data still fails honestly.
+    Idempotent, so cached plans are safe.
+    """
+    from .grid import newest_plausible_date
+
+    if jev.extract_time(question, reference_date).explicit:
+        return plan
+    newest = newest_plausible_date()
+    plan.time_start = datetime(newest.year, newest.month, newest.day, tzinfo=timezone.utc)
+    plan.time_end = plan.time_start + timedelta(days=1) - timedelta(seconds=1)
+    log.info("ask: dateless question; clamped window to newest available %s", newest)
+    return plan
 
 
 def _parse_with_jev(question: str, reference_date: str) -> QueryPlan | None:

@@ -480,6 +480,53 @@ def test_jev_variable_choice_excludes_pm25():
     assert "PM25" not in criteria
 
 
+def test_dateless_question_clamps_to_newest_available():
+    """A dateless question ("saharan dust plume") must not default to today
+    (no MERRA-2 data yet) -- it clamps to the newest plausible granule."""
+    from backend.grid import newest_plausible_date
+
+    with harness([jev_answers()]) as h:
+        resp = ask(
+            AskRequest(
+                question="saharan dust plume",
+                reference_date=REF,
+            )
+        )
+    expected = newest_plausible_date().isoformat()
+    assert resp.plan.time_start.date().isoformat() == expected, resp.plan.time_start
+    assert resp.plan.time_end.date().isoformat() == expected
+    assert "t0=" in resp.data_url
+    assert len(h.llm.calls) == 0, "fast path must not call the LLM"
+
+
+def test_explicit_date_is_never_clamped():
+    """An explicit date stays exactly as asked, even if it is today (a day
+    with no data yet -- that 422s honestly at /grid, not silently)."""
+    with harness([jev_answers()]) as h:
+        resp = ask(
+            AskRequest(
+                question="show Saharan dust today",
+                reference_date=REF,
+            )
+        )
+    assert resp.plan.time_start.date().isoformat() == REF
+    assert resp.plan.time_end.date().isoformat() == REF
+
+
+def test_clamp_is_idempotent_for_cached_plans():
+    """Second identical ask hits the plan cache; the clamped window survives
+    the round trip unchanged."""
+    from backend.grid import newest_plausible_date
+
+    with harness([jev_answers()]) as h:
+        first = ask(AskRequest(question="saharan dust plume", reference_date=REF))
+        second = ask(AskRequest(question="saharan dust plume", reference_date=REF))
+    assert second.cached is True
+    expected = newest_plausible_date().isoformat()
+    assert second.plan.time_start.date().isoformat() == expected
+    assert first.plan.time_start == second.plan.time_start
+
+
 # --------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------

@@ -80,6 +80,16 @@ def _latency_days() -> int:
     except (TypeError, ValueError):
         return 45
 
+
+def newest_plausible_date() -> date:
+    """Newest calendar date plausibly present in the MERRA-2 archive.
+
+    The archive runs ~MERRA2_LATENCY_DAYS behind real time. Shared by the
+    /grid latency gate and the /ask dateless-question clamp so both agree
+    on where "latest available data" is.
+    """
+    return date.today() - timedelta(days=_latency_days())
+
 DEFAULT_INDEX_PATH = str(
     Path(__file__).resolve().parent.parent / "data" / "kerchunk" / "index.json"
 )
@@ -608,7 +618,7 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     # A window entirely newer than the plausible archive edge gets a
     # plain-spoken 422 (checked before the manifest, so the message names
     # the cause instead of "no indexed data").
-    newest_plausible = date.today() - timedelta(days=_latency_days())
+    newest_plausible = newest_plausible_date()
     if start.date() > newest_plausible:
         raise BadGridRequestError(
             f"no MERRA-2 data yet for {start.date()}..{end.date()}: the "
