@@ -61,9 +61,21 @@
     <div id="chat-caption"></div>
   </div>
 
-  <script src="https://unpkg.com/maplibre-gl@6.10.0/dist/maplibre-gl.js"></script>
+  <!-- MapLibre v6+ ships ESM only (no UMD global): import the module,
+       expose it as window.maplibregl for the app bundle, then boot. -->
+  <script type="module">
+    try {
+      const ml = await import("https://unpkg.com/maplibre-gl@6.10.0/dist/maplibre-gl.mjs");
+      window.maplibregl = ml;
+      await import("./app14.js");
+    } catch (err) {
+      const b = document.getElementById("error-banner");
+      b.textContent = "Couldn't load the map library. Check your connection and reload.";
+      b.classList.remove("hidden");
+      console.error(err);
+    }
+  </script>
   <script src="config.js"></script>
   <script src="js/grid-render.js?v=4"></script>
-  <script src="app13.js"></script>
 </body>
 </html>
