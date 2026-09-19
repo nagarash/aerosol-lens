@@ -219,10 +219,12 @@ function gridToPixelBuffer(grid, opts = {}) {
     : normalizeRange(values);
   const span = vmax - vmin;
   const data = new Uint8ClampedArray(nx * ny * 4);
-  // Feather the bbox border (in grid pixels) so no hard rectangle edge
-  // shows on the map. Skipped on tiny grids where every pixel is a border.
+  // Feather the bbox border (in grid pixels) so the plume dissolves instead
+  // of clipping at a hard rectangle edge. 15% of the grid with a smooth
+  // (non-linear) falloff reads as a natural fade, not a soft border.
+  // Skipped on tiny grids where every pixel is a border.
   const featherPx =
-    Math.min(nx, ny) >= 6 ? Math.max(2, Math.round(Math.min(nx, ny) * 0.05)) : 0;
+    Math.min(nx, ny) >= 6 ? Math.max(2, Math.round(Math.min(nx, ny) * 0.15)) : 0;
   for (let r = 0; r < ny; r++) {
     // lats ascend south->north; canvas row 0 is the top (north).
     const outRow = ny - 1 - r;
@@ -236,13 +238,15 @@ function gridToPixelBuffer(grid, opts = {}) {
         continue;
       }
       const t = Math.min(1, Math.max(0, (v - vmin) / span));
-      // Background haze fades out: alpha ramps from 0 at the bottom of the
-      // scale to full by t=0.35, so only the plume body gets painted.
-      const valueAlpha = smoothstep(0.04, 0.35, t);
+      // Background haze drops out: alpha ramps from 0 at the bottom of the
+      // scale to full by t=0.42, so thin haze goes fully transparent and
+      // only the plume body gets painted. The plume's own thinning edges,
+      // not the bbox, define its visible shape.
+      const valueAlpha = smoothstep(0.07, 0.42, t);
       let edgeAlpha = 1;
       if (featherPx > 0) {
         const d = Math.min(c, nx - 1 - c, outRow, ny - 1 - outRow);
-        edgeAlpha = Math.min(1, d / featherPx);
+        edgeAlpha = smoothstep(0, 1, d / featherPx);
       }
       const [rr, gg, bb] = sampleColormap(stops, t);
       data[i] = rr;

@@ -177,11 +177,11 @@ check("prettyVariable names the aerosol", () => {
 
 // 7. Plume fade: low values transparent, edges feathered.
 check("smoothstep ramps 0->1 between the stops", () => {
-  assert.equal(GR.smoothstep(0.04, 0.35, 0.0), 0);
-  assert.equal(GR.smoothstep(0.04, 0.35, 0.04), 0);
-  assert.equal(GR.smoothstep(0.04, 0.35, 0.35), 1);
-  assert.equal(GR.smoothstep(0.04, 0.35, 1.0), 1);
-  const mid = GR.smoothstep(0.04, 0.35, 0.195);
+  assert.equal(GR.smoothstep(0.07, 0.42, 0.0), 0);
+  assert.equal(GR.smoothstep(0.07, 0.42, 0.07), 0);
+  assert.equal(GR.smoothstep(0.07, 0.42, 0.42), 1);
+  assert.equal(GR.smoothstep(0.07, 0.42, 1.0), 1);
+  const mid = GR.smoothstep(0.07, 0.42, 0.245);
   assert.ok(mid > 0.4 && mid < 0.6, `midpoint ≈ 0.5, got ${mid}`);
 });
 check("background haze fades to transparent, plume core stays opaque", () => {
