@@ -24,17 +24,18 @@
  */
 
 const COLORMAPS = {
-  // Yellow -> orange -> red sequential, for dust AOD (DU* variables).
+  // Pink -> magenta sequential (ColorBrewer RdPu), for dust AOD (DU*
+  // variables) -- the NASA GEOS look: dust renders pink/magenta.
   dust: [
-    [0.0, "#ffffcc"],
-    [0.125, "#ffeda0"],
-    [0.25, "#fed976"],
-    [0.375, "#feb24c"],
-    [0.5, "#fd8d3c"],
-    [0.625, "#fc4e2a"],
-    [0.75, "#e31a1c"],
-    [0.875, "#bd0026"],
-    [1.0, "#800026"],
+    [0.0, "#fff7f3"],
+    [0.125, "#fde0dd"],
+    [0.25, "#fcc5c0"],
+    [0.375, "#fa9fb5"],
+    [0.5, "#f768a1"],
+    [0.625, "#dd3497"],
+    [0.75, "#ae017e"],
+    [0.875, "#7a0177"],
+    [1.0, "#49006a"],
   ],
   // Viridis-like perceptually-uniform default for all other variables.
   viridis: [
@@ -87,7 +88,7 @@ function sampleColormap(stops, t) {
 }
 
 function colormapForVariable(variable) {
-  // Dust aerosol optical depth gets the yellow-orange-red ramp;
+  // Dust aerosol optical depth gets the pink/magenta ramp;
   // everything else uses the viridis-like default.
   return String(variable || "").toUpperCase().includes("DU")
     ? "dust"
