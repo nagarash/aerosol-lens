@@ -2,7 +2,7 @@
  *
  * Pure functions operating on plain arrays. No DOM, no canvas, no
  * MapLibre: given a /grid response object, returns a ready-to-paint
- * RGBA buffer plus the legend facts (min/mid/max, colormap). app.js
+ * RGBA buffer plus the legend facts (min/mid/max, colormap). The app
  * paints the buffer onto an offscreen canvas and hands the data URL to
  * MapLibre as an `image` source.
  *
@@ -203,7 +203,19 @@ function gridToPixelBuffer(grid, opts = {}) {
   const name = opts.colormap || colormapForVariable(grid.variable);
   const stops = COLORMAPS[name];
   if (!stops) throw new Error(`unknown colormap ${name}`);
-  const { vmin, vmax, vmid } = normalizeRange(values);
+  // Fixed range override (e.g. shared across animation frames so colors
+  // stay comparable over time); otherwise data-driven p2/p98.
+  const fixed =
+    Number.isFinite(opts.vmin) &&
+    Number.isFinite(opts.vmax) &&
+    opts.vmax > opts.vmin;
+  const { vmin, vmax, vmid } = fixed
+    ? {
+        vmin: opts.vmin,
+        vmax: opts.vmax,
+        vmid: Number.isFinite(opts.vmid) ? opts.vmid : (opts.vmin + opts.vmax) / 2,
+      }
+    : normalizeRange(values);
   const span = vmax - vmin;
   const data = new Uint8ClampedArray(nx * ny * 4);
   // Feather the bbox border (in grid pixels) so no hard rectangle edge

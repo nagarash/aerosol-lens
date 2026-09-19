@@ -219,5 +219,38 @@ check("bbox border pixels are feathered on larger grids", () => {
   assert.ok(alpha(1, 5) < alpha(5, 5), "feather ramp rises toward the interior");
   assert.ok(alpha(5, 5) > 200, "interior pixel keeps full alpha");
 });
+check("gridToPixelBuffer honors a fixed vmin/vmax override", () => {
+  const mk = (v) => ({
+    variable: "DUEXTTAU",
+    lats: [0, 1],
+    lons: [0, 1],
+    values: [
+      [v, v],
+      [v, v],
+    ],
+  });
+  // Same mid value, different fixed ranges -> different colors/legend.
+  const lo = GR.gridToPixelBuffer(mk(5), { vmin: 0, vmax: 10 });
+  const hi = GR.gridToPixelBuffer(mk(5), { vmin: 0, vmax: 100 });
+  assert.equal(lo.vmin, 0);
+  assert.equal(lo.vmax, 10);
+  assert.equal(hi.vmax, 100);
+  const px = (buf) => [buf.data[0], buf.data[1], buf.data[2]];
+  assert.notDeepEqual(px(lo), px(hi), "t=0.5 vs t=0.05 must differ");
+});
+check("gridToPixelBuffer ignores a degenerate fixed range", () => {
+  const grid = {
+    variable: "DUEXTTAU",
+    lats: [0, 1, 2],
+    lons: [0, 1, 2],
+    values: [
+      [1, 2, 3],
+      [4, 5, 6],
+      [7, 8, 9],
+    ],
+  };
+  const buf = GR.gridToPixelBuffer(grid, { vmin: 5, vmax: 5 });
+  assert.ok(buf.vmax > buf.vmin, "falls back to data-driven range");
+});
 
 console.log(`\n${n} tests passed.`);
