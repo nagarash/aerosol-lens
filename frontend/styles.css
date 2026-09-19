@@ -108,16 +108,27 @@ html, body {
 }
 #chat-caption { font-size: 12px; color: #9aa4b2; font-style: italic; }
 
-/* Mobile: keep the search bar compact and clear of the basemap picker. */
+/* Mobile: compact top bar that drops down, proportional legend. */
 @media (max-width: 640px) {
   #chat {
     left: 12px; transform: none;
     width: calc(100vw - 116px);
-    padding: 8px 10px;
+    padding: 6px 8px;
+    gap: 6px;
   }
   #chat-input { padding: 7px; font-size: 14px; }
   #chat-form button { padding: 7px 10px; }
-  #chat-log { max-height: 140px; }
+  /* Dropdown: log/caption hidden until the bar is opened. */
+  #chat-log, #chat-caption { display: none; }
+  #chat.open #chat-log { display: flex; max-height: 140px; }
+  #chat.open #chat-caption { display: block; }
   #basemap-select { top: 12px; right: 12px; }
-  #legend { width: 200px; bottom: 64px; }
+  #legend {
+    width: min(150px, 38vw);
+    bottom: 64px;
+    padding: 8px 10px;
+  }
+  #legend-title { font-size: 12px; margin-bottom: 4px; }
+  #legend-bar { height: 8px; }
+  #legend-labels, #legend-meta, #legend-guideline { font-size: 10px; }
 }
