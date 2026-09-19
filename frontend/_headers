@@ -1,4 +1,7 @@
 # Never cache the HTML shell: the JS bundle filename changes
 # every release, so a fresh index.html is all a client needs.
+# (Both / and /index.html: Pages matches rules against the request path.)
+/
+  Cache-Control: no-store
 /index.html
   Cache-Control: no-store
