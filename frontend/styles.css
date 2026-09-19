@@ -107,3 +107,17 @@ html, body {
   cursor: pointer;
 }
 #chat-caption { font-size: 12px; color: #9aa4b2; font-style: italic; }
+
+/* Mobile: keep the search bar compact and clear of the basemap picker. */
+@media (max-width: 640px) {
+  #chat {
+    left: 12px; transform: none;
+    width: calc(100vw - 116px);
+    padding: 8px 10px;
+  }
+  #chat-input { padding: 7px; font-size: 14px; }
+  #chat-form button { padding: 7px 10px; }
+  #chat-log { max-height: 140px; }
+  #basemap-select { top: 12px; right: 12px; }
+  #legend { width: 200px; bottom: 64px; }
+}
