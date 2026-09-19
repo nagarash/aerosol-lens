@@ -282,9 +282,45 @@ def test_extract_place_alias():
         assert jev_module.extract_place("dust over New Delhi last week") == "Delhi"
 
 
+def test_extract_place_transport_unions_bboxes():
+    # "Saharan dust plume over Atlantic": the viewport is the plume's
+    # path, so both regions are kept and geocode unions their bboxes.
+    with harness([]):
+        assert jev_module.extract_place(
+            "show me saharan dust plume over Atlantic in July 2026"
+        ) == "Sahara / Tropical Atlantic"
+
+
 def test_extract_place_no_match_returns_none():
     with harness([]):
         assert jev_module.extract_place("dust over Atlantis") is None
+
+
+def test_resolve_place_unions_transport_viewport():
+    from backend.geocode import resolve_place
+
+    name, bbox = resolve_place("Sahara / Tropical Atlantic")
+    assert name == "Sahara / Tropical Atlantic"
+    assert bbox == [-60.0, 5.0, 35.0, 32.0]
+
+
+def test_fast_path_transport_question_month_window():
+    # The user's query end to end: July 2026 -> whole month, daily,
+    # viewport spanning the Sahara and the Atlantic dust corridor.
+    with harness([jev_answers()]):
+        resp = ask(
+            AskRequest(
+                question="show me saharan dust plume over Atlantic in July 2026",
+                reference_date=REF,
+            )
+        )
+    plan = resp.plan
+    assert plan.variable == "DUEXTTAU"
+    assert plan.aggregation == "daily"
+    assert plan.time_start.date().isoformat() == "2026-07-01"
+    assert plan.time_end.date().isoformat() == "2026-07-31"
+    assert plan.bbox == [-60.0, 5.0, 35.0, 32.0]
+    assert "t0=2026-07-01" in resp.data_url
 
 
 def test_extract_place_here_reference_returns_none():
@@ -349,6 +385,8 @@ def test_extract_time_rules():
         ("dust over the last 2 months", "2026-07-13", REF, True),
         ("dust last month", "2026-08-12", REF, True),
         ("dust over the past year", "2025-09-11", REF, True),
+        ("dust in July 2026", "2026-07-01", "2026-07-31", True),
+        ("smoke over the Amazon in February 2024", "2024-02-01", "2024-02-29", True),
         ("show Saharan dust", REF, REF, False),  # no time expression -> today
     ]
     for question, start, end, explicit in cases:

@@ -37,6 +37,9 @@ _ALIASES: dict[str, str] = {
     "gobi": "Gobi Desert",
     "indo gangetic plain": "Indo-Gangetic Plain",
     "arctic ocean": "Arctic",
+    "atlantic": "Tropical Atlantic",
+    "tropical atlantic": "Tropical Atlantic",
+    "north atlantic": "Tropical Atlantic",
     "se asia": "Southeast Asia",
     "atlanta ga": "Atlanta",
     "beijing china": "Beijing",
@@ -100,9 +103,29 @@ def known_places_hint() -> str:
 def resolve_place(place: str) -> tuple[str, list[float]]:
     """Resolve a place name to (canonical_name, bbox).
 
+    A " / "-joined name ("Sahara / Tropical Atlantic", produced for
+    transport questions) resolves to the union of the bboxes -- the
+    viewport is the plume's path, not one endpoint.
+
     Raises UnknownPlaceError if the name is not in the gazetteer.
     """
     key = place.strip().lower()
+    parts = [p.strip() for p in key.split("/") if p.strip()]
+    if len(parts) > 1:
+        names: list[str] = []
+        boxes: list[list[float]] = []
+        for part in parts:
+            hit = _lookup().get(part)
+            if hit is None:
+                raise UnknownPlaceError(place.strip(), known_places())
+            names.append(hit[0])
+            boxes.append(hit[1])
+        return " / ".join(names), [
+            min(b[0] for b in boxes),
+            min(b[1] for b in boxes),
+            max(b[2] for b in boxes),
+            max(b[3] for b in boxes),
+        ]
     hit = _lookup().get(key)
     if hit is None:
         raise UnknownPlaceError(place.strip(), known_places())

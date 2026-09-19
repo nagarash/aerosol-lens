@@ -10,3 +10,4 @@ data/kerchunk/
 *.nc4
 *.hdf
 .DS_Store
+.wrangler/

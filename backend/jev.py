@@ -26,6 +26,7 @@ in logs or error messages.
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import os
@@ -263,14 +264,36 @@ def choose_place(question: str, candidates: list[str]) -> str | None:
 
 _HERE_RE = re.compile(r"\b(here|my area|near me|nearby)\b", re.IGNORECASE)
 
+_TRANSPORT_PARTICLE_RE = re.compile(
+    r"\b(plume|dust|smoke|ash|aerosols?)\b", re.IGNORECASE
+)
+_TRANSPORT_MOTION_RE = re.compile(
+    r"\b(over|across|from|toward|towards|into|transport|moving|spread|drift)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_transport_question(question: str) -> bool:
+    """Particle + motion language ("dust plume over the Atlantic").
+
+    Transport questions are about the plume's path, so the viewport is
+    the union of the named regions rather than one disambiguated place.
+    """
+    return bool(
+        _TRANSPORT_PARTICLE_RE.search(question)
+        and _TRANSPORT_MOTION_RE.search(question)
+    )
+
 
 def extract_place(question: str) -> str | None:
     """Find the gazetteer place a question refers to, without any model.
 
     Case-insensitive longest-match over gazetteer names + aliases. One
-    distinct canonical match -> use it; several -> Jev choice
-    disambiguation; none (or a 'here'-style reference needing the user's
-    location) -> None, and the caller falls back to the LLM path.
+    distinct canonical match -> use it; several -> for transport questions
+    return the " / "-joined union (geocode.resolve_place unions the
+    bboxes); otherwise Jev choice disambiguation; none (or a 'here'-style
+    reference needing the user's location) -> None, and the caller falls
+    back to the LLM path.
     """
     if _HERE_RE.search(question):
         # Needs user-location handling; the LLM path owns need_location.
@@ -287,6 +310,8 @@ def extract_place(question: str) -> str | None:
     for _, canonical in hits:
         if canonical not in ordered:
             ordered.append(canonical)
+    if len(ordered) > 1 and _is_transport_question(question):
+        return " / ".join(ordered)
     return choose_place(question, ordered)
 
 
@@ -345,6 +370,17 @@ def extract_time(question: str, reference_date: str) -> TimeWindow:
         d = _safe_date(int(m.group(3)), _MONTHS[m.group(2)], int(m.group(1)))
         if d:
             return TimeWindow(_day_start(d), _day_end(d), explicit=True)
+    m = re.search(rf"\b{_MONTH_RE}\s+(20\d{{2}})\b", q)
+    if m:
+        # "in July 2026": the whole calendar month, explicit so the
+        # dateless clamp leaves it alone.
+        mon, year = _MONTHS[m.group(1)], int(m.group(2))
+        last = calendar.monthrange(year, mon)[1]
+        return TimeWindow(
+            _day_start(date(year, mon, 1)),
+            _day_end(date(year, mon, last)),
+            explicit=True,
+        )
 
     if re.search(r"\b(today|now)\b", q):
         return TimeWindow(_day_start(ref), _day_end(ref), explicit=True)
