@@ -253,4 +253,30 @@ check("gridToPixelBuffer ignores a degenerate fixed range", () => {
   assert.ok(buf.vmax > buf.vmin, "falls back to data-driven range");
 });
 
+// partitionFrames: sparse archive days are skipped, order preserved.
+check("partitionFrames splits kept and skipped days", () => {
+  const g = (v) => ({ values: [[v]] });
+  const r = GR.partitionFrames(
+    [g(1), null, g(3)],
+    ["2026-07-01", "2026-07-02", "2026-07-03"]
+  );
+  assert.deepEqual(
+    r.kept.map((k) => k.date),
+    ["2026-07-01", "2026-07-03"]
+  );
+  assert.equal(r.kept[0].grid.values[0][0], 1);
+  assert.deepEqual(r.skipped, ["2026-07-02"]);
+});
+check("partitionFrames all missing", () => {
+  const r = GR.partitionFrames([null, null], ["2026-07-01", "2026-07-02"]);
+  assert.deepEqual(r.kept, []);
+  assert.deepEqual(r.skipped, ["2026-07-01", "2026-07-02"]);
+});
+check("partitionFrames none missing", () => {
+  const g = { values: [[1]] };
+  const r = GR.partitionFrames([g], ["2026-07-01"]);
+  assert.deepEqual(r.skipped, []);
+  assert.equal(r.kept.length, 1);
+});
+
 console.log(`\n${n} tests passed.`);

@@ -266,6 +266,22 @@ function formatTick(v) {
   return String(Number(v.toPrecision(3)));
 }
 
+/**
+ * Split fetched daily frames into covered vs missing days.
+ * grids[i] is the /grid result for days[i], or null when that day failed
+ * terminally (e.g. HTTP 422: no archive coverage). Order is preserved so
+ * the animation still plays chronologically over the surviving days.
+ */
+function partitionFrames(grids, days) {
+  const kept = [];
+  const skipped = [];
+  for (let i = 0; i < days.length; i++) {
+    if (grids[i]) kept.push({ grid: grids[i], date: days[i] });
+    else skipped.push(days[i]);
+  }
+  return { kept, skipped };
+}
+
 const GridRender = {
   COLORMAPS,
   hexToRgb,
@@ -281,6 +297,7 @@ const GridRender = {
   gridToPixelBuffer,
   legendGradient,
   formatTick,
+  partitionFrames,
 };
 
 if (typeof module !== "undefined" && module.exports) {
