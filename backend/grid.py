@@ -1,11 +1,18 @@
 """Grid slicer: serve MERRA-2 column-AOD slices as compact JSON for GET /grid.
 
-Pipeline:
+Pipeline (kerchunk path):
     manifest (KERCHUNK_INDEX_PATH) -> pick reference files for [t0, t1]
     -> open each reference individually with xarray (each granule's time
        decodes against its OWN CF units; xr.concat along time)
     -> select (variable, bbox, time) -> aggregate -> downsample
     -> compact JSON {variable, units, lats, lons, values, ...}
+
+Fast path: when backend/fields.py's pre-aggregated daily-mean Zarr
+store covers every requested date, the manifest and the archive are
+skipped entirely -- daily means are read from local disk and combined
+per the aggregation rule (exact equivalents of collapse_time() given
+uniform 24-step days). Responses carry "data_source": "fields" or
+"data_source": "kerchunk" so callers can see which path served them.
 
 Responses are cached on disk (see grid_cache: identical queries hit the
 cache instead of re-reading the archive); each granule's slice is
@@ -50,6 +57,11 @@ try:  # imported as part of the backend package
 except ImportError:  # run as a script: python backend/grid.py
     import grid_cache
     import grid_fetch
+
+try:  # imported as part of the backend package
+    from backend import fields as fields_store
+except ImportError:  # run as a script: python backend/fields.py
+    import fields as fields_store
 
 log = logging.getLogger("aerosol_lens.grid")
 
@@ -490,6 +502,87 @@ def to_grid_json(da, variable: str, t0: datetime, t1: datetime,
 
 
 # --------------------------------------------------------------------------
+# Pre-aggregated field store fast path (backend/fields.py)
+
+
+def _window_dates(start: datetime, end: datetime) -> list[str]:
+    """ISO date strings covering [start.date(), end.date()] inclusive."""
+    days = []
+    d = start.date()
+    while d <= end.date():
+        days.append(d.isoformat())
+        d += timedelta(days=1)
+    return days
+
+
+def _aggregate_daily_means(data, date_strs: list[str], aggregation: str):
+    """Collapse (ndays, ny, nx) daily means to one 2D field.
+
+    Exact equivalents of collapse_time() on hourly data, given uniform
+    24-step days (true for tavg1_2d_aer_Nx): hourly/daily = mean of the
+    daily means; monthly_mean = mean of monthly means, where each
+    monthly mean is the mean of that month's daily means (equal hours
+    per day, so this equals the mean of the month's hourly steps).
+    """
+    import warnings
+
+    import numpy as np
+
+    with warnings.catch_warnings():
+        # All-NaN cells (fully missing days) stay NaN, mirroring
+        # skipna=True on the kerchunk path.
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        if aggregation in ("hourly", "daily"):
+            return np.nanmean(data, axis=0)
+        # monthly_mean: group days by calendar month, mean within each
+        # month, then mean across months (equal weight per month).
+        order: list[str] = []
+        groups: dict[str, list[int]] = {}
+        for i, d in enumerate(date_strs):
+            key = d[:7]  # YYYY-MM
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(i)
+        monthly = np.stack(
+            [np.nanmean(data[groups[k]], axis=0) for k in order], axis=0
+        )
+        return np.nanmean(monthly, axis=0)
+
+
+def _get_grid_fields(var: str, bbox: tuple[float, float, float, float],
+                     start: datetime, end: datetime, agg: str,
+                     date_strs: list[str]) -> dict:
+    """Serve one aggregated slice from the pre-aggregated field store.
+
+    Same response shape as the kerchunk path (downsample/to_grid_json
+    are shared); time_steps_used counts hourly steps (24 per stored
+    day) so the two paths report comparable provenance.
+    """
+    import numpy as np
+    import xarray as xr
+
+    try:
+        data, lats, lons = fields_store.read(var, date_strs, bbox)
+    except fields_store.FieldsError as exc:
+        raise GridFetchError(
+            f"field-store read failed for {var} {bbox}: {exc}"
+        ) from exc
+    field = _aggregate_daily_means(data, date_strs, agg)
+    da = xr.DataArray(
+        np.asarray(field, dtype=np.float64),
+        dims=("lat", "lon"),
+        coords={"lat": ("lat", lats), "lon": ("lon", lons)},
+    )
+    field, was_downsampled = downsample(da)
+    result = to_grid_json(field, var, start, end, agg, was_downsampled,
+                          steps=24 * len(date_strs))
+    result["data_source"] = "fields"
+    result["cache_hit"] = False
+    return result
+
+
+# --------------------------------------------------------------------------
 # Orchestration
 
 
@@ -523,15 +616,30 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
             f"(newest plausible granule ~{newest_plausible}). "
             "Narrow the window to earlier dates."
         )
-    manifest = _load_manifest(_index_path())
-    ref_paths = _refs_for_window(manifest, start, end)
-    if target_options is None:
-        target_options = _default_target_options(ref_paths)
+    date_strs = _window_dates(start, end)
+    # Fast path: when the field store covers EVERY requested date, serve
+    # from local disk -- no manifest, no archive reads. Partial coverage
+    # falls through to the kerchunk path for the whole window.
+    ref_paths: list[str] | None = None
+    use_fields = (
+        fields_store.available()
+        and set(date_strs) <= fields_store.coverage(var)
+    )
+    data_source = "fields" if use_fields else "kerchunk"
+    if use_fields:
+        log.info("grid: fields fast path var=%s t=%s..%s (%d days)",
+                 var, start.date(), end.date(), len(date_strs))
+    else:
+        manifest = _load_manifest(_index_path())
+        ref_paths = _refs_for_window(manifest, start, end)
+        if target_options is None:
+            target_options = _default_target_options(ref_paths)
 
     # Disk cache: identical queries are common (demos, shared links,
     # frontend re-asks) and historical granules are immutable.
     cdir = grid_cache.cache_dir()
-    ckey = grid_cache.cache_key(source, var, agg, (w, s, e, n), start, end)
+    ckey = grid_cache.cache_key(source, var, agg, (w, s, e, n), start, end,
+                                data_source=data_source)
     if cdir is not None:
         ttl = grid_cache.ttl_for_window(
             end.date(), date.today() - timedelta(days=_latency_days() + 1))
@@ -539,26 +647,32 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
         if hit is not None:
             hit = dict(hit)
             hit["cache_hit"] = True
-            log.info("grid: cache HIT var=%s t=%s..%s",
-                     var, start.date(), end.date())
+            log.info("grid: cache HIT var=%s t=%s..%s src=%s",
+                     var, start.date(), end.date(), data_source)
             return hit
 
     try:
-        datasets = _open_datasets(ref_paths, target_options=target_options)
-        # Slice each granule lazily, then materialize the slices in
-        # parallel: granules are independent until the final concat, and
-        # the HTTPS byte-range reads dominate wall-clock time.
-        das = [slice_variable(ds, var, (w, s, e, n), start, end)
-               for ds in datasets]
-        steps = sum(int(da.sizes["time"]) for da in das)
-        fetched = grid_fetch.parallel_compute(das)
-        import xarray as xr
-        da = fetched[0] if len(fetched) == 1 else xr.concat(fetched, dim="time")
-        field = collapse_time(da, agg)
-        # fetched arrays are already in memory; collapse/downsample are eager.
-        field, was_downsampled = downsample(field)
-        result = to_grid_json(field, var, start, end, agg, was_downsampled, steps)
-        result["cache_hit"] = False
+        if use_fields:
+            result = _get_grid_fields(var, (w, s, e, n), start, end, agg,
+                                      date_strs)
+        else:
+            assert ref_paths is not None
+            datasets = _open_datasets(ref_paths, target_options=target_options)
+            # Slice each granule lazily, then materialize the slices in
+            # parallel: granules are independent until the final concat, and
+            # the HTTPS byte-range reads dominate wall-clock time.
+            das = [slice_variable(ds, var, (w, s, e, n), start, end)
+                   for ds in datasets]
+            steps = sum(int(da.sizes["time"]) for da in das)
+            fetched = grid_fetch.parallel_compute(das)
+            import xarray as xr
+            da = fetched[0] if len(fetched) == 1 else xr.concat(fetched, dim="time")
+            field = collapse_time(da, agg)
+            # fetched arrays are already in memory; collapse/downsample are eager.
+            field, was_downsampled = downsample(field)
+            result = to_grid_json(field, var, start, end, agg, was_downsampled, steps)
+            result["data_source"] = "kerchunk"
+            result["cache_hit"] = False
     except GridError:
         raise
     except Exception as exc:

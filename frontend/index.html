@@ -10,12 +10,6 @@
 <body>
   <div id="map"></div>
 
-  <!-- Mode toggle: never mix surface and column in one view -->
-  <div id="mode-toggle" class="panel">
-    <button data-mode="health" class="active">Air quality</button>
-    <button data-mode="plume">Plume view</button>
-  </div>
-
   <!-- Basemap picker -->
   <select id="basemap-select" class="panel" title="Basemap">
     <option value="satellite">Satellite</option>
@@ -23,28 +17,6 @@
     <option value="light">Light</option>
     <option value="dark">Dark</option>
   </select>
-
-  <!-- Settings: bring-your-own Google Air Quality API key (localStorage only) -->
-  <button id="settings-btn" class="panel" title="Settings">⚙</button>
-  <div id="settings" class="panel hidden">
-    <div class="settings-head">
-      <strong>Settings</strong>
-      <button id="settings-close" title="Close">✕</button>
-    </div>
-    <label for="settings-key">Google Air Quality API key</label>
-    <input id="settings-key" type="password" autocomplete="off"
-           placeholder="Paste your key" />
-    <div class="settings-row">
-      <button id="settings-save">Save</button>
-      <button id="settings-clear">Clear</button>
-    </div>
-    <p class="settings-note">
-      The key stays in this browser and is only ever sent to Google.
-      Get one at
-      <a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>
-      (enable the <em>Air Quality API</em>).
-    </p>
-  </div>
 
   <!-- Backend / grid errors, in plain language -->
   <div id="error-banner" class="hidden"></div>
@@ -55,7 +27,7 @@
     <span id="loading-label">Loading…</span>
   </div>
 
-  <!-- Legend: data-driven colorbar for plume grids, US-AQI scale for live air quality -->
+  <!-- Legend: data-driven colorbar for aerosol grids -->
   <div id="legend" class="panel">
     <div id="legend-title">Aerosol Lens</div>
     <div id="legend-bar"></div>
@@ -78,7 +50,7 @@
     <div id="chat-log"></div>
     <form id="chat-form">
       <input id="chat-input" type="text" autocomplete="off"
-             placeholder="e.g. Is it safe to run in Delhi today? / Show me the Saharan dust plume" />
+             placeholder="e.g. Show me the Saharan dust plume / Dust over Delhi" />
       <button type="submit">Ask</button>
     </form>
     <div id="chat-caption"></div>
@@ -87,6 +59,6 @@
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <script src="config.js"></script>
   <script src="js/grid-render.js"></script>
-  <script src="app.js?v=2"></script>
+  <script src="app3.js"></script>
 </body>
 </html>

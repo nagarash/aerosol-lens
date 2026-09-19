@@ -1,25 +1,20 @@
-/* Aerosol Lens frontend.
+/* Aerosol Lens frontend: aerosols & particulates only.
  *
  * Data flow:
  *   1. Chat input -> POST {BACKEND_URL}/ask -> {plan, data_url, legend, cached}
- *   2. plan.level === 'surface' -> Air quality mode: Google Air Quality API
- *      heatmap tiles called DIRECTLY from the browser with the user's own
- *      key (bring-your-own-key; the backend never sees it).
- *   3. plan.level === 'column'  -> Plume mode: fetch the plan's /grid URL,
- *      render the 2D field client-side through a colormap onto an offscreen
- *      canvas, add it as a MapLibre `image` source.
- *   4. The mode toggle follows the plan: if the plan's level disagrees with
- *      the current toggle, the UI auto-switches with a one-line notice.
- *      Surface and column data are NEVER rendered together.
+ *   2. plan's /grid URL -> GET -> 2D speciated aerosol field (MERRA-2).
+ *   3. The field is rendered client-side through a colormap onto an
+ *      offscreen canvas and added as a MapLibre `image` source.
+ *
+ * The live air-quality layer is gone: the Google Air Quality heatmap, its
+ * bring-your-own-key settings, and the Air quality / Plume tab switcher
+ * were removed. Single aerosol/particulates view.
  */
 
 const BACKEND_URL = (
   (window.AEROSOL_LENS_CONFIG && window.AEROSOL_LENS_CONFIG.BACKEND_URL) ||
   "http://localhost:8000"
 ).replace(/\/+$/, "");
-
-const GOOGLE_KEY_STORAGE = "google_aq_key";
-const GOOGLE_MAPTYPE = "UAQI_RED_GREEN"; // Google's red-green US-AQI heatmap
 
 // Basemap choices (all keyless Esri; tile order z/y/x). Satellite is the
 // default: maximum land detail, and yellow-orange-red plumes pop on it.
@@ -43,6 +38,10 @@ const BASEMAPS = {
     tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"],
   },
 };
+
+// One-time cleanup: drop the retired Google Air Quality API key if an
+// older version of the app stored one.
+try { localStorage.removeItem("google_aq_key"); } catch (_) {}
 
 const map = new maplibregl.Map({
   container: "map",
@@ -80,8 +79,8 @@ const map = new maplibregl.Map({
   zoom: 2,
 });
 
-// Switch basemap; the plume/aqi data layers are added above these, so they
-// stay on top. Labels overlay only applies to satellite.
+// Switch basemap; the plume data layer is added above these, so it stays
+// on top. Labels overlay only applies to satellite.
 function setBasemap(name) {
   const cfg = BASEMAPS[name];
   if (!cfg || !map.getSource("basemap")) return;
@@ -98,8 +97,6 @@ function setBasemap(name) {
 }
 
 map.addControl(new maplibregl.NavigationControl(), "top-right");
-
-let currentMode = "health"; // 'health' (surface) | 'plume' (column)
 
 // ---------------------------------------------------------------------------
 // Small UI helpers
@@ -154,43 +151,6 @@ async function httpError(res, what) {
 }
 
 // ---------------------------------------------------------------------------
-// Mode toggle: follows the plan, never mixes surface + column.
-
-function setMode(mode, reason) {
-  currentMode = mode;
-  document.querySelectorAll("#mode-toggle button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.mode === mode)
-  );
-  if (reason) log(reason);
-}
-
-function modeForPlan(plan) {
-  return plan.level === "surface" ? "health" : "plume";
-}
-
-document.querySelectorAll("#mode-toggle button").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    setMode(
-      btn.dataset.mode,
-      `Mode: ${btn.dataset.mode === "health" ? "Air quality (surface)" : "Plume view (column)"}. Ask a question to load data.`
-    );
-    clearDataLayer();
-  });
-});
-
-// Basemap picker: restore saved choice, wire the select.
-try {
-  const saved = localStorage.getItem("aerosol_basemap");
-  if (saved && BASEMAPS[saved]) {
-    // Apply after the style loads so sources exist.
-    map.once("load", () => setBasemap(saved));
-  }
-} catch (_) {}
-document.getElementById("basemap-select").addEventListener("change", (e) => {
-  setBasemap(e.target.value);
-});
-
-// ---------------------------------------------------------------------------
 // Ask flow
 
 $("chat-form").addEventListener("submit", async (e) => {
@@ -211,13 +171,6 @@ $("chat-form").addEventListener("submit", async (e) => {
     if (!res.ok) throw await httpError(res, "Couldn't understand that question");
     const { plan, data_url, legend, cached } = await res.json();
 
-    const wantMode = modeForPlan(plan);
-    if (wantMode !== currentMode) {
-      setMode(
-        wantMode,
-        `Switched to ${wantMode === "health" ? "Air quality" : "Plume view"} — this plan is ${plan.level}-level data.`
-      );
-    }
     log(
       `Plan: ${plan.intent} / ${plan.level} / ${plan.variable}${cached ? " (cached)" : ""}`
     );
@@ -234,10 +187,10 @@ $("chat-form").addEventListener("submit", async (e) => {
 });
 
 // ---------------------------------------------------------------------------
-// Rendering: exactly one data layer at a time.
+// Rendering: exactly one aerosol data layer at a time.
 
 function clearDataLayer() {
-  for (const id of ["data-layer", "data-source", "mask-layer", "mask-source", "bbox-line", "bbox-source"]) {
+  for (const id of ["data-layer", "data-source"]) {
     if (map.getLayer(id)) map.removeLayer(id);
     if (map.getSource(id)) map.removeSource(id);
   }
@@ -245,140 +198,32 @@ function clearDataLayer() {
 
 async function renderData(plan, data_url, legend) {
   clearDataLayer();
-  if (data_url.startsWith("google://")) {
-    renderAirQuality(plan, data_url);
-  } else if (data_url.startsWith("/grid")) {
+  if (data_url.startsWith("/grid")) {
     await renderPlume(plan, data_url);
+  } else if (data_url.startsWith("google://")) {
+    // The live air-quality view was removed; the backend may still plan
+    // surface-level questions. Guide toward aerosol queries instead.
+    renderEmptyLegend();
+    log("Aerosol Lens now shows aerosols and particulates only — the live air-quality view was removed. Try e.g. “Show the Saharan dust plume”.");
   } else if (data_url.startsWith("cams://")) {
-    log("Historical surface data (CAMS) isn't wired up yet — try a live air-quality question or a plume query.");
+    renderEmptyLegend();
+    log("Historical surface particulate data (CAMS) isn't wired up yet — try an aerosol plume question.");
   } else {
     showError(`No renderer for this data source (${plan.source}).`);
   }
 }
 
-// --- Air quality: Google heatmap tiles, key stays in the browser. ----------
-
-function googleTileTemplate(data_url) {
-  let template = data_url.replace(
-    "google://",
-    "https://airquality.googleapis.com/v1/"
-  );
-  if (!template.includes("mapTypes/")) {
-    template = template.replace(
-      "/heatmapTiles/",
-      `/mapTypes/${GOOGLE_MAPTYPE}/heatmapTiles/`
-    );
-  }
-  return template;
-}
-
-function renderAirQuality(plan, data_url) {
-  const key = localStorage.getItem(GOOGLE_KEY_STORAGE) || "";
-  if (!key) {
-    // Friendly empty state: no key, no layer, settings opened for them.
-    log("Live air-quality view needs a Google Air Quality API key (bring-your-own-key). Add it in Settings — it stays in this browser.");
-    openSettings();
-    renderSurfaceLegendEmpty();
-    return;
-  }
-  const template = googleTileTemplate(data_url);
-  map.addSource("data-source", {
-    type: "raster",
-    tiles: [`${template}?key=${encodeURIComponent(key)}`],
-    tileSize: 256,
-    attribution: "Air quality: Google Air Quality API",
-  });
-  map.addLayer({
-    id: "data-layer",
-    type: "raster",
-    source: "data-source",
-    paint: { "raster-opacity": plan.style?.opacity ?? 0.65 },
-  });
-  map.fitBounds(
-    [
-      [plan.bbox[0], plan.bbox[1]],
-      [plan.bbox[2], plan.bbox[3]],
-    ],
-    { padding: 40 }
-  );
-  addSpotlightMask(plan.bbox);
-  renderSurfaceLegend(plan);
-}
-
-// Google's heatmap tiles are global pre-rendered rasters: they paint every
-// region, not just the queried place. Dim everything outside the plan's bbox
-// (spotlight mask) and outline the bbox so the queried area reads clearly.
-function addSpotlightMask(bbox) {
-  const [w, s, e, n] = bbox;
-  map.addSource("mask-source", {
-    type: "geojson",
-    data: {
-      type: "FeatureCollection",
-      features: [
-        {
-          type: "Feature",
-          properties: {},
-          geometry: {
-            type: "Polygon",
-            coordinates: [
-              [[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]],
-              [[w, s], [w, n], [e, n], [e, s], [w, s]],
-            ],
-          },
-        },
-      ],
-    },
-  });
-  map.addLayer({
-    id: "mask-layer",
-    type: "fill",
-    source: "mask-source",
-    paint: { "fill-color": "#000000", "fill-opacity": 0.5 },
-  });
-  map.addSource("bbox-source", {
-    type: "geojson",
-    data: {
-      type: "Feature",
-      properties: {},
-      geometry: {
-        type: "LineString",
-        coordinates: [[w, s], [w, n], [e, n], [e, s], [w, s]],
-      },
-    },
-  });
-  map.addLayer({
-    id: "bbox-line",
-    type: "line",
-    source: "bbox-source",
-    paint: { "line-color": "#ffffff", "line-width": 2, "line-opacity": 0.9 },
-  });
-}
-
-function renderSurfaceLegend(plan) {
-  // Google's UAQI_RED_GREEN tiles use the US AQI color scale; the bar is
-  // fixed because the tile colors are fixed server-side.
-  $("legend-title").textContent = "Air quality (US AQI)";
-  $("legend-bar").style.background =
-    "linear-gradient(to right,#00e400,#ffff00,#ff7e00,#ff0000,#8f3f97,#7e0023)";
-  $("legend-min").textContent = "Good";
-  $("legend-mid").textContent = "";
-  $("legend-max").textContent = "Hazardous";
-  $("legend-meta").textContent = "Live heatmap · Google Air Quality API";
-  $("legend-guideline").textContent =
-    plan.style?.mode === "exceedance" ? "Guideline: WHO 24h PM2.5" : "";
-}
-
-function renderSurfaceLegendEmpty() {
-  $("legend-title").textContent = "Air quality";
+function renderEmptyLegend() {
+  $("legend-title").textContent = "Aerosols";
   $("legend-bar").style.background = "#333";
   $("legend-min").textContent = "";
-  $("legend-mid").textContent = "no API key";
+  $("legend-mid").textContent = "no data";
   $("legend-max").textContent = "";
-  $("legend-meta").textContent = "Add a key in Settings (⚙)";
+  $("legend-meta").textContent = "";
   $("legend-guideline").textContent = "";
 }
 
-// --- Plume: /grid JSON -> colormap -> canvas -> MapLibre image source. -----
+// --- Aerosols: /grid JSON -> colormap -> canvas -> MapLibre image source. -
 
 async function renderPlume(plan, data_url) {
   showLoading(true, "Fetching grid data…");
@@ -428,38 +273,16 @@ function renderPlumeLegend(grid, buf) {
   $("legend-guideline").textContent = "";
 }
 
-// ---------------------------------------------------------------------------
-// Settings: Google API key (bring-your-own-key, localStorage only).
-
-function openSettings() {
-  $("settings-key").value = localStorage.getItem(GOOGLE_KEY_STORAGE) || "";
-  $("settings").classList.remove("hidden");
-}
-
-function closeSettings() {
-  $("settings").classList.add("hidden");
-}
-
-$("settings-btn").addEventListener("click", () => {
-  $("settings").classList.toggle("hidden");
-  if (!$("settings").classList.contains("hidden")) openSettings();
-});
-$("settings-close").addEventListener("click", closeSettings);
-$("settings-save").addEventListener("click", () => {
-  const key = $("settings-key").value.trim();
-  if (key) {
-    localStorage.setItem(GOOGLE_KEY_STORAGE, key);
-    log("Google API key saved — it stays in this browser and is only sent to Google.");
-  } else {
-    localStorage.removeItem(GOOGLE_KEY_STORAGE);
-    log("Google API key removed.");
+// Basemap picker: restore saved choice, wire the select.
+try {
+  const saved = localStorage.getItem("aerosol_basemap");
+  if (saved && BASEMAPS[saved]) {
+    // Apply after the style loads so sources exist.
+    map.once("load", () => setBasemap(saved));
   }
-  closeSettings();
-});
-$("settings-clear").addEventListener("click", () => {
-  localStorage.removeItem(GOOGLE_KEY_STORAGE);
-  $("settings-key").value = "";
-  log("Google API key removed.");
+} catch (_) {}
+document.getElementById("basemap-select").addEventListener("change", (e) => {
+  setBasemap(e.target.value);
 });
 
 // ---------------------------------------------------------------------------
@@ -470,4 +293,4 @@ function setupTimeScrubber(plan) {
   $("play-btn").onclick = () => log("Animation not yet implemented.");
 }
 
-log("Ask about air quality or aerosol plumes — e.g. “Is it safe to run in Delhi today?”");
+log("Ask about aerosol plumes and particulates — e.g. “Show me the Saharan dust plume”.");

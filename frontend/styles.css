@@ -23,17 +23,6 @@ html, body {
   z-index: 10;
 }
 
-#mode-toggle { top: 12px; left: 12px; display: flex; gap: 6px; }
-#mode-toggle button {
-  background: #1c2330;
-  color: #cfd6e2;
-  border: 1px solid #2a3340;
-  border-radius: 6px;
-  padding: 6px 12px;
-  cursor: pointer;
-}
-#mode-toggle button.active { background: #2f6fed; color: #fff; border-color: #2f6fed; }
-
 #basemap-select {
   top: 12px; left: 50%; transform: translateX(-50%);
   background: rgba(13, 17, 23, 0.88); color: #cfd6e2;
@@ -48,30 +37,6 @@ html, body {
 #legend-labels { display: flex; justify-content: space-between; font-size: 11px; color: #9aa4b2; margin-top: 4px; }
 #legend-meta { font-size: 11px; color: #9aa4b2; margin-top: 4px; }
 #legend-guideline { font-size: 11px; color: #ffb86b; margin-top: 4px; }
-
-/* Settings (gear) */
-#settings-btn {
-  top: 12px; right: 52px;
-  font-size: 16px; padding: 6px 10px; cursor: pointer;
-  color: #cfd6e2;
-}
-#settings { top: 52px; right: 12px; width: 280px; display: flex; flex-direction: column; gap: 8px; }
-#settings.hidden { display: none; }
-.settings-head { display: flex; justify-content: space-between; align-items: center; }
-.settings-head button { background: none; border: none; color: #9aa4b2; cursor: pointer; font-size: 14px; }
-#settings label { font-size: 12px; color: #9aa4b2; }
-#settings-key {
-  background: #1c2330; border: 1px solid #2a3340; border-radius: 6px;
-  color: #e6e9ef; padding: 8px; width: 100%; box-sizing: border-box;
-}
-.settings-row { display: flex; gap: 6px; }
-.settings-row button {
-  background: #2f6fed; color: #fff; border: none; border-radius: 6px;
-  padding: 6px 12px; cursor: pointer;
-}
-#settings-clear { background: #3a4456 !important; }
-.settings-note { font-size: 11px; color: #9aa4b2; margin: 0; line-height: 1.5; }
-.settings-note a { color: #7aa2f7; }
 
 /* Error banner: plain-language backend errors */
 #error-banner {

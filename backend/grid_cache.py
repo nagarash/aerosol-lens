@@ -78,17 +78,29 @@ def normalize_bbox(bbox) -> tuple[float, float, float, float]:
 
 
 def cache_key(source: str, variable: str, agg: str,
-              bbox, start, end) -> str:
-    """Stable 32-hex-char key for a normalized grid query."""
+              bbox, start, end, data_source: str = "") -> str:
+    """Stable 32-hex-char key for a normalized grid query.
+
+    `data_source` ("fields" vs "kerchunk") participates in the key so a
+    cached response is always labeled with the path that produced it.
+    Empty (the kerchunk default) keeps pre-existing cache keys stable.
+    """
     w, s, e, n = normalize_bbox(bbox)
-    raw = "|".join([
+    parts = [
         source.strip().lower(),
         variable.strip().upper(),
         agg.strip().lower(),
         f"{w:.2f},{s:.2f},{e:.2f},{n:.2f}",
         start.isoformat(),
         end.isoformat(),
-    ])
+    ]
+    ds = data_source.strip().lower()
+    if ds:
+        # Only the fields fast path passes a data_source, so pre-existing
+        # kerchunk-path keys are byte-identical to before this parameter
+        # existed (no cache invalidation on deploy).
+        parts.append(ds)
+    raw = "|".join(parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
