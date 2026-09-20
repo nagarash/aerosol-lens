@@ -40,6 +40,13 @@ from .geocode import name_variants
 
 log = logging.getLogger("aerosol-lens.jev")
 
+try:
+    import ahocorasick
+
+    _HAVE_AHOCORASICK = True
+except ImportError:  # pragma: no cover - exercised by the no-dependency path
+    _HAVE_AHOCORASICK = False
+
 
 class JevError(Exception):
     """Jev classification failed: no key, transport error, or bad response."""
@@ -285,6 +292,58 @@ def _is_transport_question(question: str) -> bool:
     )
 
 
+_automaton = None  # lazily-built ahocorasick.Automaton; see _get_automaton()
+
+
+def _get_automaton():
+    """Build (once per process) an Aho-Corasick automaton over gazetteer
+    names + aliases: a single pass per question regardless of gazetteer
+    size, needed once backend/gazetteer_build.py's GeoNames extension
+    pushes the name count into the thousands. name_variants() is itself
+    backed by geocode.py's lru_cache(maxsize=1) loaders, so -- like
+    those -- this is built once and reused for the life of the process.
+    """
+    global _automaton
+    if _automaton is None:
+        automaton = ahocorasick.Automaton()
+        for variant, canonical in name_variants().items():
+            automaton.add_word(variant, (variant, canonical))
+        automaton.make_automaton()
+        _automaton = automaton
+    return _automaton
+
+
+def _is_word_char(ch: str) -> bool:
+    return ch.isalnum() or ch == "_"
+
+
+def _ahocorasick_hits(question: str) -> list[tuple[int, str]]:
+    """(match length, canonical name) via one Aho-Corasick pass, with a
+    manual word-boundary check standing in for regex \\b (Aho-Corasick
+    itself only does substring matching)."""
+    lowered = question.lower()
+    hits: list[tuple[int, str]] = []
+    for end_index, (variant, canonical) in _get_automaton().iter(lowered):
+        start = end_index - len(variant) + 1
+        before_ok = start == 0 or not _is_word_char(lowered[start - 1])
+        after_ok = end_index + 1 >= len(lowered) or not _is_word_char(lowered[end_index + 1])
+        if before_ok and after_ok:
+            hits.append((len(variant), canonical))
+    return hits
+
+
+def _regex_hits(question: str) -> list[tuple[int, str]]:
+    """Fallback for environments without pyahocorasick installed -- the
+    original per-name regex scan. Fine at small gazetteer sizes; if you
+    run backend/gazetteer_build.py to pull in GeoNames, install
+    pyahocorasick (see backend/requirements.txt) so this path isn't hit."""
+    hits: list[tuple[int, str]] = []
+    for variant, canonical in name_variants().items():
+        if re.search(r"\b" + re.escape(variant) + r"\b", question, re.IGNORECASE):
+            hits.append((len(variant), canonical))
+    return hits
+
+
 def extract_place(question: str) -> str | None:
     """Find the gazetteer place a question refers to, without any model.
 
@@ -298,11 +357,7 @@ def extract_place(question: str) -> str | None:
     if _HERE_RE.search(question):
         # Needs user-location handling; the LLM path owns need_location.
         return None
-    variants = name_variants()  # lowercased variant -> canonical name
-    hits: list[tuple[int, str]] = []
-    for variant, canonical in variants.items():
-        if re.search(r"\b" + re.escape(variant) + r"\b", question, re.IGNORECASE):
-            hits.append((len(variant), canonical))
+    hits = _ahocorasick_hits(question) if _HAVE_AHOCORASICK else _regex_hits(question)
     if not hits:
         return None
     hits.sort(reverse=True)  # longest match first

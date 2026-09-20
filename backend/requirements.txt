@@ -9,6 +9,13 @@ h5py>=3.8
 s3fs>=2024.1
 dask>=2024.1
 
+# Aho-Corasick automaton for backend/jev.py::extract_place -- single-pass
+# gazetteer name matching, needed once backend/gazetteer_build.py's
+# GeoNames extension pushes the match set into the thousands. Optional at
+# import time (jev.py falls back to a regex scan if missing) but required
+# for that fallback to stay fast at scale.
+pyahocorasick>=2.0
+
 # Granules are read over HTTPS (see backend/earthdata_auth.py), which means
 # fsspec needs its async HTTP backend. It arrives transitively via s3fs
 # today; pin it explicitly because the grid path now depends on it directly.

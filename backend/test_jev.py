@@ -292,8 +292,11 @@ def test_extract_place_transport_unions_bboxes():
 
 
 def test_extract_place_no_match_returns_none():
+    # A deliberately unreal name -- "Atlantis" used to serve this purpose
+    # but GeoNames has an actual town called Atlantis (South Africa, pop
+    # >15k), which now correctly resolves via the extended gazetteer.
     with harness([]):
-        assert jev_module.extract_place("dust over Atlantis") is None
+        assert jev_module.extract_place("dust over Notarealplace9247") is None
 
 
 def test_resolve_place_unions_transport_viewport():

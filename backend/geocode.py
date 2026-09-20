@@ -8,6 +8,20 @@ geography as numbers.
 Resolution is a local dict lookup (<50ms, no API call). Unknown places
 raise UnknownPlaceError -- the API surfaces them as 422, naming the
 place, instead of guessing.
+
+Two gazetteer files, two different roles:
+
+- gazetteer.sample.json: hand-curated, small on purpose. It alone drives
+  known_places() / known_places_hint(), and agent/prompts.py appends the
+  hint to EVERY LLM fallback prompt -- so this file's size is a direct
+  token-cost/latency knob and must stay small and reviewed.
+- gazetteer_extended.json (optional, built by backend/gazetteer_build.py
+  from GeoNames -- see that file's docstring): thousands of cities and
+  named physical regions. Merged into resolution (_lookup(), used by
+  resolve_place() and jev.py's extract_place()) so the deterministic
+  matcher recognizes far more names, but NEVER surfaced to the model.
+  Absent in a fresh checkout until the build script is run; resolution
+  then just falls back to the curated file, same as before this existed.
 """
 
 from __future__ import annotations
@@ -18,6 +32,9 @@ from pathlib import Path
 
 _GAZETTEER_PATH = (
     Path(__file__).resolve().parent.parent / "data" / "gazetteer.sample.json"
+)
+_GAZETTEER_EXTENDED_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "gazetteer_extended.json"
 )
 
 # Hand-curated aliases -> canonical gazetteer names. Deterministic; the
@@ -44,6 +61,12 @@ _ALIASES: dict[str, str] = {
     "atlanta ga": "Atlanta",
     "beijing china": "Beijing",
     "delhi india": "Delhi",
+    # "Washington" alone means the state (backend/us_states_build.py) --
+    # these route the city references to the actually-separate D.C. entry.
+    "dc": "Washington, D.C.",
+    "d.c.": "Washington, D.C.",
+    "washington dc": "Washington, D.C.",
+    "washington d.c.": "Washington, D.C.",
 }
 
 
@@ -61,15 +84,42 @@ class UnknownPlaceError(Exception):
 
 @lru_cache(maxsize=1)
 def _load() -> dict[str, list[float]]:
-    """Canonical place name -> bbox [w, s, e, n]. Loaded once, cached."""
+    """Canonical place name -> bbox [w, s, e, n]. Loaded once, cached.
+
+    Curated only -- this is what known_places()/known_places_hint() read,
+    and that hint goes straight into the LLM fallback prompt, so this
+    function must never pull in the (much larger) extended gazetteer.
+    """
     with open(_GAZETTEER_PATH, encoding="utf-8") as f:
         data = json.load(f)
     return {p["name"]: list(p["bbox"]) for p in data["places"]}
 
 
+@lru_cache(maxsize=1)
+def _load_extended() -> dict[str, list[float]]:
+    """GeoNames-derived name -> bbox, if backend/gazetteer_build.py has been run.
+
+    Match-only (see module docstring): merged into _lookup() for
+    resolution, but deliberately not part of _load()/known_places(), so
+    it never reaches the LLM prompt.
+    """
+    if not _GAZETTEER_EXTENDED_PATH.exists():
+        return {}
+    with open(_GAZETTEER_EXTENDED_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    return {p["name"]: list(p["bbox"]) for p in data["places"]}
+
+
 def _lookup() -> dict[str, tuple[str, list[float]]]:
-    """Lowercased name/alias -> (canonical name, bbox)."""
+    """Lowercased name/alias -> (canonical name, bbox).
+
+    Precedence low -> high: extended (GeoNames) < curated < aliases, so a
+    hand-curated entry always wins a name collision with GeoNames, and an
+    explicit alias always wins over both.
+    """
     table: dict[str, tuple[str, list[float]]] = {}
+    for name, bbox in _load_extended().items():
+        table[name.lower()] = (name, bbox)
     for name, bbox in _load().items():
         table[name.lower()] = (name, bbox)
     for alias, canonical in _ALIASES.items():

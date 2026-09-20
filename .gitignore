@@ -6,6 +6,8 @@ venv/
 .env.*
 !.env.example
 data/kerchunk/
+data/.geonames_cache/
+data/.geo_cache/
 *.nc
 *.nc4
 *.hdf

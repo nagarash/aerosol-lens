@@ -191,9 +191,69 @@ Secrets: `EARTHDATA_TOKEN` (MERRA-2 archive access), `ADMIN_TOKEN`
 | Path | What |
 |---|---|
 | `agent/` | QueryPlan schema, deterministic validator, prompts, mapping tables |
-| `backend/` | FastAPI app (`app.py`), Jev fast path (`jev.py`), `/grid` slicer (`grid.py`), Zarr field store (`fields.py`), backfill (`backfill.py`), disk cache (`grid_cache.py`), rate limiter (`rate_limit.py`), kerchunk builder (`kerchunk_index.py`) |
+| `backend/` | FastAPI app (`app.py`), Jev fast path (`jev.py`), `/grid` slicer (`grid.py`), Zarr field store (`fields.py`), backfill (`backfill.py`), disk cache (`grid_cache.py`), rate limiter (`rate_limit.py`), kerchunk builder (`kerchunk_index.py`), gazetteer builders (`gazetteer_build.py`, `us_states_build.py`), LLM fallback eval harness (`eval_llm_fallback.py`) |
 | `frontend/` | Single-page MapLibre app (CDN), chat box, legend, timeline |
 | `data/` | Gazetteer + event catalog + colormap samples |
+
+### Place gazetteer (`backend/geocode.py`)
+
+Place names never reach the model as coordinates: the LLM/Jev returns a
+name, `backend/geocode.py` resolves it to a bbox from a **local**
+gazetteer (no geocoding API call), and unresolvable names 422 instead of
+being guessed at. Two files back this, with different roles:
+
+- `data/gazetteer.sample.json` — hand-curated, ~68 places: the original
+  ~16 regions/cities plus all 50 US states + DC + Puerto Rico (+ Tonga)
+  from `python backend/us_states_build.py` (needs `pip install pyshp`;
+  pulls real boundaries from the US Census Bureau + Natural Earth, not
+  hand-typed bboxes — see that file's docstring for why, including the
+  Alaska antimeridian handling). The *only* source for
+  `known_places()`/`known_places_hint()`, which is appended to every LLM
+  fallback prompt (`agent/prompts.py`) — keep this small and reviewed;
+  its size is a direct token-cost/latency knob. Curated names always win
+  a collision with the extended (GeoNames) layer below, which is how
+  common names like "Georgia" resolve to the expected US state instead
+  of the country.
+- `data/gazetteer_extended.json` (generated, committed) — ~2,050
+  well-known GeoNames cities (population ≥ 500,000 by default) + named
+  physical regions (deserts, basins, mountain ranges — a much lower
+  notability floor for deserts specifically, since there are few enough
+  of them worldwide that even regional ones are dust-relevant, vs.
+  thousands of obscure mountain ridges), built by
+  `python backend/gazetteer_build.py`. Deliberately NOT a general
+  GeoNames dump — see that file's docstring for why and for the
+  notability-floor tuning. Merged into local name matching only
+  (`jev.py::extract_place`, `geocode.resolve_place`), never into the LLM
+  prompt. A curated name always wins a collision with an extended one.
+  Regenerate with:
+
+  ```bash
+  python backend/gazetteer_build.py                       # well-known cities + regions (~420MB GeoNames pull)
+  python backend/gazetteer_build.py --cities-only          # skip the big pull, cities only
+  python backend/gazetteer_build.py --min-city-population 100000  # broader coverage (~4,300 cities)
+  ```
+
+  Install `pyahocorasick` (in `backend/requirements.txt`) — `extract_place()`
+  falls back to a per-name regex scan without it, which is meaningfully
+  slower once GeoNames names are merged in on top of the curated set.
+
+### LLM fallback eval (`backend/eval_llm_fallback.py`)
+
+A fixed set of hard hand-picked questions (multi-place disambiguation,
+named events, figurative phrasing, health refusals, places only the
+extended gazetteer knows) run through the real `_parse_with_agent` code
+path — same prompt, same retries, same guardrails — against whichever
+candidate models you list, to compare LLM choices on cost/quality instead
+of guessing:
+
+```bash
+export OPENROUTER_API_KEY=...
+python backend/eval_llm_fallback.py
+```
+
+Costs real API calls (up to 2 per case per model); see the file's
+docstring for the two real gaps it surfaced (event catalog never loaded
+into the prompt; US state name collisions, now fixed).
 
 ## Configuration
 

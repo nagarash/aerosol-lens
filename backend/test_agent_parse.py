@@ -294,18 +294,22 @@ def test_health_plan_rejected_without_retry():
 
 
 def test_unknown_place_returns_422_naming_place():
-    d = plume_draft(place="Atlantis")
+    # A deliberately unreal name -- "Atlantis" used to serve this purpose
+    # but GeoNames has an actual town called Atlantis (South Africa, pop
+    # >15k), which now correctly resolves via the extended gazetteer.
+    place = "Notarealplace9247"
+    d = plume_draft(place=place)
     with harness([d, d]):  # retry can't fix an unknown place either
         exc = expect_http(
             422,
             lambda: ask(
                 AskRequest(
-                    question="show me dust over Atlantis last week",
+                    question=f"show me dust over {place} last week",
                     reference_date=REF,
                 )
             ),
         )
-    assert "Atlantis" in exc.detail, f"422 must name the place: {exc.detail}"
+    assert place in exc.detail, f"422 must name the place: {exc.detail}"
 
 
 def test_place_alias_resolves():
