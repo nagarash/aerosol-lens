@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+netCDF4>=1.6
+cftime>=1.6

@@ -13,7 +13,100 @@ Health / surface air-quality questions are **not** servable in this
 build (the Google Air Quality path was removed; CAMS is not wired up)
 and return an honest `422`, never column data dressed up as an answer.
 
-## Architecture
+
+## Hourly plume pipeline (opt-in)
+
+See [the implementation spec](docs/hourly-plume-plan.md). The existing daily
+pipeline remains the default until hourly coverage has been ingested. Set
+`HOURLY_PLUMES_ENABLED=1` to route `/ask` through the new local-first parser.
+`JEV_ENABLED` applies only to the legacy route; the hourly route never calls Jev.
+
+- Straightforward queries resolve locally. An unresolved query uses at most one
+  general LLM call through `LITELLM_MODEL` (10-second timeout, no repair retry).
+  Validated interpretations have a bounded in-process cache scoped by model,
+  question, reference date, location, and prompt; availability is resolved anew.
+  The model interprets names/events/dates; local code supplies coordinates and
+  data availability. Without a configured model, clear queries still work.
+- Recent wording uses the latest contiguous published hours for the selected
+  variable, defaulting to 48 frames. Actual dates are always displayed. Explicit
+  historical dates are preserved. Ranges beyond seven days initially show their
+  first 48 hours and say so; comparisons and forecasts request clarification.
+- The event catalog is now loaded for hourly routing. Initial event playback is
+  the first 48 catalog hours, **not** a claimed peak or representative period.
+- `/frames` provides timestamps, native coordinates, and six-hour batch URLs.
+  `/frames/batch` returns gzip-compressed little-endian float32 arrays in
+  `(time, lat, lon)` order; NaN means missing. The manifest fixes the display
+  scale at AOD 0–1, with higher values saturated. Numeric data are not clipped.
+- `frontend/app16.js` displays the first batch immediately and loads the rest
+  sequentially while playing. It reuses a MapLibre canvas source, supports
+  pause/scrub/basemap changes, and aborts obsolete requests.
+
+### Ingestion and retention
+
+The hourly store is separate from the existing **daily-mean** field store.
+No all-history download is needed. First prepare a kerchunk manifest using the
+existing index builder, then ingest its latest seven indexed days:
+
+```bash
+export HOURLY_FIELDS_DIR=/data/hourly
+python -m backend.hourly
+# Or a specific date range / one variable:
+python -m backend.hourly --start 2020-06-14 --end 2020-06-15 --variables DUEXTTAU
+# Preload and pin an event's first 48 hours:
+python -m backend.hourly --events sahara-dust-godzilla-2020
+```
+
+Run incremental indexing followed by this idempotent command from your existing
+job scheduler as new granules arrive. No scheduler or production backfill is
+installed by this change. Existing Earthdata authentication is reused.
+
+Each variable-day is a complete 24-hour Zarr array with `(6, 91, 144)` chunks,
+validated and atomically published. The newest seven stored days per variable
+are retained; other historical days use an LRU budget (default 2 GB), excluding
+pinned dates. A rolling seven-day window across six variables is approximately
+840 MB **uncompressed**, plus historical cache and pins. Reserve volume space
+for both and monitor pins separately. Environment controls:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `HOURLY_PLUMES_ENABLED` | `0` | Opt into hourly `/ask` routing |
+| `HOURLY_FIELDS_DIR` | `/data/hourly` | Hourly Zarr store |
+| `HOURLY_RETAIN_DAYS` | `7` | Protected recent days during cold-request eviction |
+| `HOURLY_CACHE_MAX_MB` | `2048` | Historical cache budget, excluding recent/pinned data |
+
+CLI retention flags control eviction after ingestion. Cold historical requests
+fetch and cache a complete variable-day, then crop it for playback. This trades
+higher first-request transfer for reuse across hours and viewports. Archive
+fetches are serialized across processes to bound memory on the 1 GB server;
+warm reads do not wait on the archive lock. This first implementation does not
+claim optimized cold-download latency or a benchmark-selected chunk shape.
+Missing indexed days fail explicitly rather than skipping gaps unnoticed.
+
+### Verification and evals
+
+```bash
+pip install -r backend/requirements-test.txt
+python -m pytest -q backend/test_hourly_plumes.py
+python -m backend.eval_hourly                  # offline stubs, no NASA/model calls
+python -m backend.eval_hourly --live --model openrouter/YOUR_MODEL
+node frontend/js/hourly-frames.test.js
+node frontend/js/grid-render.test.js
+```
+
+The live eval requires provider credentials and incurs provider charges. It
+uses fixed coverage to isolate routing quality, reports each call's usage and
+latency, and returns nonzero on failures. Offline results test routing and
+validation; they are **not** evidence of any real model's accuracy. The older
+`eval_llm_fallback.py` remains a legacy-parser evaluation only.
+
+The response includes routing milliseconds; batch responses expose a
+`Server-Timing` header. Browser Performance entries `plume-first-frame-ms` and
+`plume-buffered-ms` measure query-to-display and query-to-full-buffer latency.
+Use these to compare warm/cold paths; they are not production benchmarks.
+
+Browser implementation follows the [MapLibre canvas-source API](https://maplibre.org/maplibre-gl-js/docs/API/type-aliases/CanvasSourceSpecification/).
+
+## Legacy daily architecture
 
 ```
  ┌──────────┐   question    ┌──────────────────────────────────┐

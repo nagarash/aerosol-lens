@@ -67,7 +67,7 @@
     try {
       const ml = await import("https://unpkg.com/maplibre-gl@6.10.0/dist/maplibre-gl.mjs");
       window.maplibregl = ml;
-      await import("./app15.js");
+      await import("./app16.js");
     } catch (err) {
       const b = document.getElementById("error-banner");
       b.textContent = "Couldn't load the map library. Check your connection and reload.";
@@ -77,5 +77,6 @@
   </script>
   <script src="config.js"></script>
   <script src="js/grid-render.js?v=4"></script>
+  <script src="js/hourly-frames.js?v=1"></script>
 </body>
 </html>

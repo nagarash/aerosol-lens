@@ -63,6 +63,11 @@ _ALIASES: dict[str, str] = {
     "delhi india": "Delhi",
     # "Washington" alone means the state (backend/us_states_build.py) --
     # these route the city references to the actually-separate D.C. entry.
+    "country of georgia": "Georgia country",
+    "georgia the country": "Georgia country",
+    "georgia near the black sea": "Georgia country",
+    "georgia us state": "Georgia",
+    "nyc": "New York City",
     "dc": "Washington, D.C.",
     "d.c.": "Washington, D.C.",
     "washington dc": "Washington, D.C.",
@@ -123,8 +128,8 @@ def _lookup() -> dict[str, tuple[str, list[float]]]:
     for name, bbox in _load().items():
         table[name.lower()] = (name, bbox)
     for alias, canonical in _ALIASES.items():
-        if canonical in _load():
-            table[alias] = (canonical, _load()[canonical])
+        if canonical.lower() in table:
+            table[alias] = table[canonical.lower()]
     return table
 
 
@@ -170,13 +175,32 @@ def resolve_place(place: str) -> tuple[str, list[float]]:
                 raise UnknownPlaceError(place.strip(), known_places())
             names.append(hit[0])
             boxes.append(hit[1])
-        return " / ".join(names), [
-            min(b[0] for b in boxes),
-            min(b[1] for b in boxes),
-            max(b[2] for b in boxes),
-            max(b[3] for b in boxes),
-        ]
+        return " / ".join(names), union_boxes(boxes)
+
     hit = _lookup().get(key)
     if hit is None:
         raise UnknownPlaceError(place.strip(), known_places())
     return hit
+
+
+def union_boxes(boxes):
+    """Smallest longitude arc containing all boxes, including wrapped boxes."""
+    south, north = min(b[1] for b in boxes), max(b[3] for b in boxes)
+    intervals = []
+    for w, _, e, _ in boxes:
+        if w == -180 and e == 180:
+            return [-180, south, 180, north]
+        a, b = w + 180, e + 180
+        intervals.extend([(a, b)] if w < e else [(a, 360), (0, b)])
+    merged = []
+    for a, b in sorted(intervals):
+        if merged and a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    gaps = [(merged[(i+1) % len(merged)][0] + (360 if i == len(merged)-1 else 0) - b,
+             b, merged[(i+1) % len(merged)][0]) for i, (_, b) in enumerate(merged)]
+    gap, end, start = max(gaps)
+    if gap <= 0:
+        return [-180, south, 180, north]
+    return [start - 180, south, end - 180, north]

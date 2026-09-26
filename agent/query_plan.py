@@ -66,7 +66,7 @@ class QueryPlan(BaseModel):
     )
     bbox: list[float] = Field(
         description="Bounding box [west, south, east, north] in decimal degrees, "
-        "WGS84. Must satisfy w < e and s < n."
+        "WGS84. Requires s < n; w > e denotes an antimeridian crossing."
     )
     time_start: datetime = Field(description="Inclusive start of the time window (UTC).")
     time_end: datetime = Field(description="Inclusive end of the time window (UTC).")
@@ -94,8 +94,8 @@ class QueryPlan(BaseModel):
             raise ValueError("longitudes must be within [-180, 180]")
         if not (-90 <= s <= 90 and -90 <= n <= 90):
             raise ValueError("latitudes must be within [-90, 90]")
-        if not (w < e):
-            raise ValueError("bbox west must be < east (no antimeridian wrap yet)")
+        if w == e:
+            raise ValueError("bbox west and east must differ; west > east crosses the antimeridian")
         if not (s < n):
             raise ValueError("bbox south must be < north")
         return v

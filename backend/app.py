@@ -43,7 +43,8 @@ log = logging.getLogger("aerosol-lens")
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ValidationError as PydanticValidationError
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
+from functools import lru_cache
 
 from agent.prompts import SYSTEM_PROMPT, build_user_message
 from agent.query_plan import QueryPlan, QueryPlanDraft, StyleSpec
@@ -83,7 +84,7 @@ class GridRateLimitMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http" and scope["path"].startswith("/grid"):
+        if scope["type"] == "http" and scope["path"].startswith(("/grid", "/frames")):
             limiter = rate_limit.get_limiter()
             ip = rate_limit.client_ip(scope)
             if not limiter.allow(ip):
@@ -150,6 +151,7 @@ class AskResponse(BaseModel):
     data_url: str  # what the frontend renders: tile template or /grid URL
     legend: dict  # {units, stops: [[value, color], ...], guideline?}
     cached: bool
+    resolution: dict | None = None
 
 
 # Provider prefix (from the LiteLLM model string) -> env vars holding keys.
@@ -292,6 +294,8 @@ def admin_backfill_status(request: Request) -> dict:
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
+    if os.environ.get("HOURLY_PLUMES_ENABLED", "0").lower() in ("1", "true", "yes"):
+        return ask_hourly(req)
     question = req.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="question must not be empty")
@@ -674,3 +678,76 @@ def grid(
         elapsed_ms,
     )
     return result
+
+
+@lru_cache(maxsize=512)
+def _cached_hourly_interpretation(model, message_json):
+    from .plume_router import Interpretation
+    response = litellm.completion(model=model, messages=json.loads(message_json),
+                                  response_format={"type": "json_object"},
+                                  max_tokens=400, timeout=10, num_retries=0)
+    content = response.choices[0].message.content or ""
+    Interpretation.model_validate_json(content)  # never cache malformed output
+    return content
+
+
+def _hourly_model_call(messages):
+    """One call on an interpretation-cache miss; never a repair retry."""
+    return _cached_hourly_interpretation(_require_llm(), json.dumps(messages, sort_keys=True))
+
+
+def _hourly_error(exc):
+    from .grid import BadGridRequestError, IndexNotBuiltError, GridFetchError
+    if isinstance(exc, (IndexNotBuiltError, EarthdataTokenMissingError)):
+        return HTTPException(status_code=503, detail=str(exc))
+    if isinstance(exc, (GridFetchError, EarthdataExchangeError)):
+        return HTTPException(status_code=502, detail="Hourly data retrieval failed; please retry.")
+    if _is_rate_limit(exc):
+        return HTTPException(status_code=429, detail="Model rate limited; please retry later.")
+    if isinstance(exc, (ValueError, UnknownPlaceError, BadGridRequestError)):
+        return HTTPException(status_code=422, detail=str(exc))
+    return HTTPException(status_code=502, detail="Hourly request could not complete; please retry.")
+
+
+def ask_hourly(req):
+    started = time.monotonic()
+    from .plume_router import route
+    q = req.question.strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="question must not be empty")
+    ref = req.reference_date or datetime.now(timezone.utc).date().isoformat()
+    try:
+        plan, resolution = route(q, ref, req.user_location, _hourly_model_call)
+        validate_plan(plan)
+    except LLMNotConfiguredError as exc:
+        raise HTTPException(status_code=422, detail="Please specify a place, aerosol, and dates; model fallback is not configured.") from exc
+    except Exception as exc:
+        raise _hourly_error(exc) from exc
+    resolution["routing_ms"] = round((time.monotonic() - started) * 1000, 2)
+    log.info("hourly: route=%s ms=%s", resolution["routing"], resolution["routing_ms"])
+    query = urlencode({"variable": plan.variable, "bbox": ",".join(map(str, plan.bbox)),
+                       "t0": plan.time_start.isoformat(), "t1": plan.time_end.isoformat()})
+    return AskResponse(plan=plan, data_url="/frames?" + query, legend=_legend_for(plan),
+                       cached=False, resolution=resolution)
+
+
+@app.get("/frames")
+def frames(variable: str, bbox: str, t0: str, t1: str):
+    from .hourly import frame_manifest
+    try:
+        return frame_manifest(variable, bbox, t0, t1)
+    except Exception as exc:
+        raise _hourly_error(exc) from exc
+
+
+@app.get("/frames/batch")
+def frames_batch(variable: str, bbox: str, t0: str, t1: str):
+    from .hourly import frame_batch
+    started = time.monotonic()
+    try:
+        payload = frame_batch(variable, bbox, t0, t1)
+        return Response(payload, media_type="application/octet-stream",
+                        headers={"Content-Encoding": "gzip", "Cache-Control": "public, max-age=86400",
+                                 "Server-Timing": f"hourly;dur={(time.monotonic()-started)*1000:.2f}"})
+    except Exception as exc:
+        raise _hourly_error(exc) from exc

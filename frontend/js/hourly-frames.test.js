@@ -1,0 +1,12 @@
+const assert = require('node:assert/strict');
+const { decode, grid } = require('./hourly-frames.js');
+const manifest = {nx: 2, ny: 2};
+const values = [0, 1, NaN, 3, 10, 11, 12, 13];
+const bytes = new ArrayBuffer(values.length * 4);
+values.forEach((v,i) => new DataView(bytes).setFloat32(i*4,v,true));
+const frames = decode(bytes,manifest,2);
+assert.equal(frames.length,2);
+assert.ok(Number.isNaN(frames[0][2]));
+assert.deepEqual(grid(manifest,frames[1],'2020-01-01T01:30:00Z').values, [[10,11],[12,13]]);
+assert.throws(() => decode(bytes,manifest,3), /Incomplete/);
+console.log('Hourly binary decoding: passed');

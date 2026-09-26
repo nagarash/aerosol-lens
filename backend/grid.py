@@ -677,6 +677,8 @@ def get_grid(source: str, variable: str, bbox: str, t0: str, t1: str,
     ref_paths: list[str] | None = None
     use_fields = (
         fields_store.available()
+        and start.hour == 0 and start.minute == 0 and start.second == 0
+        and end.hour == 23 and end.minute == 59 and end.second >= 59
         and set(date_strs) <= fields_store.coverage(var)
     )
     data_source = "fields" if use_fields else "kerchunk"
