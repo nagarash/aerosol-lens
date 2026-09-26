@@ -280,4 +280,20 @@ check("partitionFrames none missing", () => {
   assert.equal(r.kept.length, 1);
 });
 
+check("gridBounds pads a single-cell grid to one native cell", () => {
+  assert.deepEqual(
+    GR.gridBounds({ lats: [28.5], lons: [76.875], values: [[0.14]] }),
+    [[76.5625, 28.25], [77.1875, 28.75]]);
+});
+check("gridCorners pads a single-cell grid to one native cell", () => {
+  assert.deepEqual(
+    GR.gridCorners({ lats: [28.5], lons: [76.875], values: [[0.14]] }),
+    [[76.5625, 28.75], [77.1875, 28.75], [77.1875, 28.25], [76.5625, 28.25]]);
+});
+check("gridBounds leaves normal grids untouched", () => {
+  assert.deepEqual(
+    GR.gridBounds({ lats: [10, 20], lons: [0, 10], values: [[1, 2], [3, 4]] }),
+    [[0, 10], [10, 20]]);
+});
+
 console.log(`\n${n} tests passed.`);

@@ -158,10 +158,8 @@ function unwrapLons(lons) {
 function gridCorners(grid) {
   const lons = unwrapLons(grid.lons);
   const lats = grid.lats;
-  const left = lons[0];
-  const right = lons[lons.length - 1];
-  const bottom = lats[0];
-  const top = lats[lats.length - 1];
+  const [left, right, bottom, top] =
+    padDegenerate(lons[0], lons[lons.length - 1], lats[0], lats[lats.length - 1]);
   return [
     [left, top],
     [right, top],
@@ -171,12 +169,24 @@ function gridCorners(grid) {
 }
 
 /** [[w, s], [e, n]] bounds for map.fitBounds (lons unwrapped). */
+/** Pad a zero-extent bound to one native MERRA-2 cell (0.625° lon × 0.5° lat).
+
+A single-cell grid otherwise yields degenerate bounds; fitBounds then
+zooms to max on nothing and the image overlay has zero area. Each grid
+value represents a cell, not a point, so one cell of extent is honest. */
+function padDegenerate(w, e, s, n) {
+  if (w === e) { w -= 0.3125; e += 0.3125; }
+  if (s === n) { s -= 0.25; n += 0.25; }
+  return [w, e, s, n];
+}
+
 function gridBounds(grid) {
   const lons = unwrapLons(grid.lons);
   const lats = grid.lats;
+  const [w, e, s, n] = padDegenerate(lons[0], lons[lons.length - 1], lats[0], lats[lats.length - 1]);
   return [
-    [lons[0], lats[0]],
-    [lons[lons.length - 1], lats[lats.length - 1]],
+    [w, s],
+    [e, n],
   ];
 }
 
