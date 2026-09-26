@@ -242,3 +242,51 @@ def test_interpretation_cache_reuses_only_valid_output(monkeypatch):
                 api._cached_hourly_interpretation('mock/test', messages)
         assert completion.call_count == 2
     api._cached_hourly_interpretation.cache_clear()
+
+
+def test_patch_key_normalizes_to_expanded_cells():
+    # Bboxes that expand to the same native cells share a patch.
+    assert hourly.patch_key('70.1,10.1,70.5,10.4') == hourly.patch_key('70,10,70.625,10.5')
+    assert hourly.patch_key('70,10,70.625,10.5') != hourly.patch_key('71,10,71.625,10.5')
+
+
+def test_patch_roundtrip_and_cold_batch_uses_it(monkeypatch, tmp_path):
+    import xarray as xr
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    data = np.broadcast_to(np.arange(24, dtype='float32')[:,None,None], (24,361,576))
+    ds = xr.Dataset({'DUEXTTAU': (('time','lat','lon'), data)}, coords={
+        'time': np.array([t.replace(tzinfo=None) for t in hourly.stamps('2020-01-01')], dtype='datetime64[ns]'),
+        'lat':hourly.fields._latitudes(), 'lon':hourly.fields._longitudes()})
+    with patch.object(hourly.grid, '_load_manifest', return_value={'files':{'2020-01-01':'local.json'}}), \
+         patch.object(hourly.grid, '_default_target_options', return_value={}), \
+         patch.object(hourly.grid, '_open_datasets', return_value=[ds]) as opened:
+        one = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T00:30:00Z','2020-01-01T05:30:00Z')
+        assert opened.call_count == 1
+        p = hourly.find_patch('DUEXTTAU', '2020-01-01', '0,0,1,1')
+        assert p is not None and (p/'complete.json').exists()
+        meta = json.loads((p/'complete.json').read_text())
+        assert meta['hours'] == 24 and meta['version'] == 1
+        # Second batch reuses the patch: no NASA call, correct hours.
+        two = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T06:30:00Z','2020-01-01T11:30:00Z')
+        assert opened.call_count == 1
+        assert np.frombuffer(gzip.decompress(one),dtype='<f4')[0] == 0
+        assert np.frombuffer(gzip.decompress(two),dtype='<f4')[0] == 6
+        # Patch grid matches the canonical bbox grid exactly.
+        _, _, lats, lons = hourly.coordinates('0,0,1,1')
+        assert meta['lats'] == lats and meta['lons'] == lons
+
+
+def test_full_day_preferred_over_patch_and_prune_drops_redundant(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    data = np.broadcast_to(np.arange(24, dtype='float32')[:,None,None], (24,361,576)).copy()
+    with hourly.writer_lock():
+        hourly.publish('DUEXTTAU', '2020-01-01', data, hourly.stamps('2020-01-01'))
+    # Plant a patch for the same day, then prune: the patch is redundant.
+    pdir = tmp_path/'DUEXTTAU'/'patches'
+    pdir.mkdir(parents=True)
+    fake = pdir/'2020-01-01_deadbeef12345678.zarr'
+    fake.mkdir()
+    (fake/'complete.json').write_text('{"version":1,"hours":24}')
+    hourly.prune(retain_days=7, max_mb=2048)
+    assert not fake.exists()
+    assert hourly.day_path('DUEXTTAU', '2020-01-01').exists()
