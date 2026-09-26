@@ -14,7 +14,7 @@ function check(name, fn) {
 // 1. Colormap endpoints return the exact stop colors.
 check("dust colormap endpoints", () => {
   assert.deepEqual(GR.sampleColormap(GR.COLORMAPS.dust, 0), [255, 247, 243]);
-  assert.deepEqual(GR.sampleColormap(GR.COLORMAPS.dust, 1), [73, 0, 106]);
+  assert.deepEqual(GR.sampleColormap(GR.COLORMAPS.dust, 1), [92, 10, 114]); // #5c0a72
 });
 check("viridis colormap endpoints", () => {
   assert.deepEqual(GR.sampleColormap(GR.COLORMAPS.viridis, 0), [68, 1, 84]);
@@ -22,7 +22,7 @@ check("viridis colormap endpoints", () => {
 });
 check("colormap midpoint interpolates between stops", () => {
   const [r, g, b] = GR.sampleColormap(GR.COLORMAPS.dust, 0.5);
-  assert.deepEqual([r, g, b], [247, 104, 161]); // #f768a1 exactly at t=0.5
+  assert.deepEqual([r, g, b], [244, 95, 160]); // #f45fa0 exactly at t=0.5
 });
 check("colormapForVariable picks dust for DU* and viridis otherwise", () => {
   assert.equal(GR.colormapForVariable("DUEXTTAU"), "dust");
@@ -114,7 +114,7 @@ check("northernmost latitude lands on canvas top row", () => {
   const buf = GR.gridToPixelBuffer(grid, { colormap: "dust" });
   const top = [buf.data[0], buf.data[1], buf.data[2]]; // canvas y=0
   const bottom = [buf.data[8], buf.data[9], buf.data[10]]; // canvas y=2
-  assert.deepEqual(top, [73, 0, 106], "top row = dust(1.0)");
+  assert.deepEqual(top, [92, 10, 114], "top row = dust(1.0)");
   assert.deepEqual(bottom, [255, 247, 243], "bottom row = dust(0.0)");
 });
 check("shape mismatch throws an honest error", () => {
@@ -162,7 +162,7 @@ check("gridBounds unwraps for fitBounds", () => {
 check("legendGradient is a CSS gradient over the colormap", () => {
   const g = GR.legendGradient("dust");
   assert.ok(g.startsWith("linear-gradient(to right,"), g);
-  assert.ok(g.includes("#fff7f3") && g.includes("#49006a"), g);
+  assert.ok(g.includes("#fff7f3") && g.includes("#5c0a72"), g);
 });
 check("formatTick keeps AOD-scale precision", () => {
   assert.equal(GR.formatTick(0.0065), "0.0065");

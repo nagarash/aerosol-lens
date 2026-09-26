@@ -294,7 +294,9 @@ def admin_backfill_status(request: Request) -> dict:
 
 @app.post("/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
-    if os.environ.get("HOURLY_PLUMES_ENABLED", "0").lower() in ("1", "true", "yes"):
+    # Hourly plume routing is the default /ask path. Set HOURLY_PLUMES_ENABLED=0
+    # to fall back to the legacy Jev/LLM daily planner.
+    if os.environ.get("HOURLY_PLUMES_ENABLED", "1").lower() in ("1", "true", "yes"):
         return ask_hourly(req)
     question = req.question.strip()
     if not question:

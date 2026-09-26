@@ -24,18 +24,20 @@
  */
 
 const COLORMAPS = {
-  // Pink -> magenta sequential (ColorBrewer RdPu), for dust AOD (DU*
-  // variables) -- the NASA GEOS look: dust renders pink/magenta.
+  // Bright pink -> magenta sequential (ColorBrewer RdPu, brightened for
+  // contrast over land) for dust AOD (DU* variables) -- the NASA GEOS
+  // look: dust renders pink/magenta, with more saturated mid-tones so the
+  // plume body reads strongly on bright satellite land.
   dust: [
     [0.0, "#fff7f3"],
-    [0.125, "#fde0dd"],
-    [0.25, "#fcc5c0"],
-    [0.375, "#fa9fb5"],
-    [0.5, "#f768a1"],
-    [0.625, "#dd3497"],
-    [0.75, "#ae017e"],
-    [0.875, "#7a0177"],
-    [1.0, "#49006a"],
+    [0.125, "#fdd8d0"],
+    [0.25, "#fcb3ba"],
+    [0.375, "#fa8ab8"],
+    [0.5, "#f45fa0"],
+    [0.625, "#e02f92"],
+    [0.75, "#c0007f"],
+    [0.875, "#8c0a80"],
+    [1.0, "#5c0a72"],
   ],
   // Viridis-like perceptually-uniform default for all other variables.
   viridis: [
@@ -242,7 +244,7 @@ function gridToPixelBuffer(grid, opts = {}) {
       // scale to full by t=0.42, so thin haze goes fully transparent and
       // only the plume body gets painted. The plume's own thinning edges,
       // not the bbox, define its visible shape.
-      const valueAlpha = smoothstep(0.07, 0.42, t);
+      const valueAlpha = smoothstep(0.05, 0.34, t);
       let edgeAlpha = 1;
       if (featherPx > 0) {
         const d = Math.min(c, nx - 1 - c, outRow, ny - 1 - outRow);
@@ -252,7 +254,7 @@ function gridToPixelBuffer(grid, opts = {}) {
       data[i] = rr;
       data[i + 1] = gg;
       data[i + 2] = bb;
-      data[i + 3] = Math.round(235 * valueAlpha * edgeAlpha);
+      data[i + 3] = Math.round(255 * valueAlpha * edgeAlpha);
     }
   }
   return { width: nx, height: ny, data, vmin, vmid, vmax, colormap: name };
