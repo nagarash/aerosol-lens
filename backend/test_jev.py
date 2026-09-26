@@ -131,6 +131,9 @@ class harness:
             "LITELLM_MODEL": self.model,
             "JEV_MODEL": JEV_MODEL,
             "JEV_MIN_CONFIDENCE": "0.7",
+            # These tests cover the legacy /ask planner; keep the hourly
+            # default from rerouting them.
+            "HOURLY_PLUMES_ENABLED": "0",
         }.items():
             self._saved_env[k] = os.environ.get(k)
             os.environ[k] = v

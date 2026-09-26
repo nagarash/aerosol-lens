@@ -73,6 +73,10 @@ class harness:
     def __enter__(self):
         self._saved_env = os.environ.get("LITELLM_MODEL")
         os.environ["LITELLM_MODEL"] = self.model
+        # These tests cover the legacy /ask planner; keep the hourly
+        # default from rerouting them.
+        self._saved_hourly = os.environ.get("HOURLY_PLUMES_ENABLED")
+        os.environ["HOURLY_PLUMES_ENABLED"] = "0"
         self._saved_litellm = app_module.litellm
         self._saved_cache = app_module.plan_cache
         app_module.litellm = self.fake
@@ -84,6 +88,10 @@ class harness:
             os.environ.pop("LITELLM_MODEL", None)
         else:
             os.environ["LITELLM_MODEL"] = self._saved_env
+        if self._saved_hourly is None:
+            os.environ.pop("HOURLY_PLUMES_ENABLED", None)
+        else:
+            os.environ["HOURLY_PLUMES_ENABLED"] = self._saved_hourly
         app_module.litellm = self._saved_litellm
         app_module.plan_cache = self._saved_cache
         return False
@@ -353,21 +361,27 @@ def test_guardrail_rejects_health_with_column_directly():
     raise AssertionError("guardrail did not reject health+column")
 
 
-def test_missing_model_setting_returns_501():
+def test_missing_model_setting_returns_422():
+    # In the hourly architecture a missing model is not a 501: the router
+    # asks the user for a place, aerosol, and dates instead (422).
     saved_env = os.environ.pop("LITELLM_MODEL", None)
     saved_litellm, saved_cache = app_module.litellm, app_module.plan_cache
     app_module.litellm = FakeLiteLLM([])
     app_module.plan_cache = PlanCache()
     try:
+        # A vague event reference forces the model fallback path (local
+        # interpretation returns None), which is where the missing
+        # LITELLM_MODEL surfaces. Health questions 422 deterministically
+        # before any model is needed, so they can't exercise this.
         exc = expect_http(
-            501,
+            422,
             lambda: ask(
                 AskRequest(
-                    question="is it safe to run in Delhi today", reference_date=REF
+                    question="show me that orange sky event", reference_date=REF
                 )
             ),
         )
-        assert "LITELLM_MODEL" in exc.detail
+        assert "model fallback is not configured" in exc.detail
     finally:
         if saved_env is not None:
             os.environ["LITELLM_MODEL"] = saved_env
