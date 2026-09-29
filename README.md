@@ -37,9 +37,10 @@ coverage is available.
   `/frames/batch` returns gzip-compressed little-endian float32 arrays in
   `(time, lat, lon)` order; NaN means missing. The manifest fixes the display
   scale at AOD 0–1, with higher values saturated. Numeric data are not clipped.
-- `frontend/app17.js` displays the first batch immediately and loads the rest
+- `frontend/app18.js` displays the first batch immediately and loads the rest
   sequentially while playing. It reuses a MapLibre canvas source, supports
-  pause/scrub/basemap changes, and aborts obsolete requests.
+  basemap changes, and aborts obsolete requests. The 48-hour default window
+  autoplays continuously in a loop with no visible playback controls.
 
 ### Ingestion and retention
 

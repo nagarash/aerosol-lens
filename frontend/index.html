@@ -43,13 +43,6 @@
     <div id="legend-guideline"></div>
   </div>
 
-  <!-- Time scrubber (stub: wired to frame prefetching later) -->
-  <div id="timebar" class="panel">
-    <button id="play-btn" title="Play animation">▶</button>
-    <input id="time-slider" type="range" min="0" max="0" value="0" />
-    <span id="time-label"></span>
-  </div>
-
   <!-- Chat: natural language -> QueryPlan -->
   <div id="chat" class="panel">
     <form id="chat-form">
@@ -67,7 +60,7 @@
     try {
       const ml = await import("https://unpkg.com/maplibre-gl@6.10.0/dist/maplibre-gl.mjs");
       window.maplibregl = ml;
-      await import("./app17.js");
+      await import("./app18.js");
     } catch (err) {
       const b = document.getElementById("error-banner");
       b.textContent = "Couldn't load the map library. Check your connection and reload.";
