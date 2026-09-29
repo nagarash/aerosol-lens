@@ -395,3 +395,12 @@ def test_latest_window_local_only_without_index():
     with patch.object(hourly, 'coverage', return_value={date(2026,8,24),date(2026,8,25)}), \
          patch.object(hourly.grid, '_load_manifest', side_effect=IndexNotBuiltError('missing')):
         assert hourly.latest_window('DUEXTTAU')[1] == LATEST
+
+def test_parse_time_repairs_plus_decoded_as_space():
+    from backend.grid import _parse_time
+    dt = _parse_time('2026-08-12T12:30:00 00:00', 't0')
+    assert dt == datetime(2026, 8, 12, 12, 30, tzinfo=UTC)
+    with pytest.raises(BadGridRequestError):
+        _parse_time('not-a-time', 't0')
+    with pytest.raises(BadGridRequestError):
+        _parse_time('2026-08-12T12:30:00 nonsense', 't0')

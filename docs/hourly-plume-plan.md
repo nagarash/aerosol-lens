@@ -56,8 +56,10 @@ A common recent query renders 48 distinct hourly frames with zero model calls an
 
 ## Implementation status
 
-Implemented as an opt-in hourly path: validated atomic hourly storage; bounded
-cold-day reuse; retention and event pinning; contiguous per-variable coverage;
+Implemented and now the default /ask route (HOURLY_PLUMES_ENABLED defaults to 1;
+0 selects the legacy planner): validated atomic hourly storage; bounded
+cold-day reuse via a bbox-cropped patch store (single-variable kerchunk range
+reads, only the chunks intersecting the viewport); retention and event pinning; contiguous per-variable coverage;
 local-first routing with one general-model fallback; event grounding; explicit
 state/country override; antimeridian validation/union; frame manifest and binary
 batches; progressive canvas playback; offline acceptance tests and a live-model
@@ -71,10 +73,11 @@ live evaluation. The existing gazetteer still uses approximate region/city
 viewports and is not a full hierarchical geocoder.
 
 Operational work before production enablement: refresh the index, ingest real
-hourly coverage, run live model evals, measure cold retrieval and first-frame
-latency on the deployment, and then set HOURLY_PLUMES_ENABLED=1. An external
-scheduler should run indexing/ingestion; no deployment or recurring job has
-been started by this implementation.
+hourly coverage, run live model evals, and measure cold retrieval and first-frame
+latency on the deployment. (HOURLY_PLUMES_ENABLED already defaults to 1; the
+hourly route is the default /ask path.) An external scheduler should run
+indexing/ingestion; no deployment or recurring job has been started by this
+implementation.
 
 
 ### Regional request-time reads
@@ -86,3 +89,4 @@ variable, native coordinates and timestamps. This caches exact regional batches,
 not shared source chunks. Upstream chunk layout still controls read amplification.
 Archive jobs remain serialized with four Dask compute workers; warm reads bypass
 the archive lock. Validate cold and repeated historical batches after deployment.
+>>>>>>> c186f99 (fix: repair +-as-space UTC offsets in _parse_time; docs no longer say opt-in)

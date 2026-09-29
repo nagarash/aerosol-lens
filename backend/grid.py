@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -271,9 +272,19 @@ def _parse_time(value: str, name: str) -> datetime:
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
-        raise BadGridRequestError(
-            f"{name} must be ISO-8601, got {value!r}."
-        ) from None
+        # A raw "+" in a query string decodes as a space, mangling the UTC
+        # offset ("...+12:30:00 00:00"). Repair and retry once; anything else
+        # is a genuine format error.
+        m = re.fullmatch(r"(.*T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?) (\d{2}:\d{2})", value)
+        if m:
+            try:
+                dt = datetime.fromisoformat(m.group(1) + "+" + m.group(2))
+            except ValueError:
+                m = None
+        if not m:
+            raise BadGridRequestError(
+                f"{name} must be ISO-8601, got {value!r}."
+            ) from None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(timezone.utc)
