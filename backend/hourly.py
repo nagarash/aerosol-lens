@@ -14,6 +14,7 @@ import fcntl
 import gzip
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +25,8 @@ from urllib.parse import urlencode
 import numpy as np
 from agent.mappings import MERRA2_COLUMN_VARIABLES, canonical_variable
 from . import fields, grid
+
+log = logging.getLogger("aerosol-lens.hourly")
 
 UTC = timezone.utc
 MAX_HOURS = 168
@@ -352,7 +355,11 @@ def _remote_frames(var, times, lats, lons):
             da = datasets[0][var].sel(
                 time=np.array([t.replace(tzinfo=None) for t in selected], dtype='datetime64[ns]'),
                 lat=lats, lon=lons).transpose('time', 'lat', 'lon')
-            data = np.asarray(da.compute(scheduler='threads', num_workers=4).values, dtype='<f4')
+            # Default scheduler: the /grid path materializes kerchunk reads this
+            # way in production. An explicit threaded scheduler is unproven
+            # against the async reference filesystem; keep this on the path
+            # that is known to work until a threaded variant is validated.
+            data = np.asarray(da.compute().values, dtype='<f4')
             if data.shape != (len(selected), len(lats), len(lons)):
                 raise grid.GridFetchError('Unexpected regional hourly shape.')
             data = data.copy()
@@ -361,6 +368,10 @@ def _remote_frames(var, times, lats, lons):
         except grid.GridFetchError:
             raise
         except Exception as exc:
+            # Log the full traceback server-side: the /frames/batch endpoint
+            # maps this to a generic 502, so without this the cause is invisible
+            # in `fly logs`.
+            log.exception("hourly _remote_frames failed for %s %s", var, selected[0].date())
             raise grid.GridFetchError(f'Regional hourly read failed: {exc}') from exc
         finally:
             for ds in datasets:
