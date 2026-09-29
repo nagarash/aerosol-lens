@@ -14,11 +14,11 @@ build (the Google Air Quality path was removed; CAMS is not wired up)
 and return an honest `422`, never column data dressed up as an answer.
 
 
-## Hourly plume pipeline (opt-in)
+## Hourly plume pipeline
 
-See [the implementation spec](docs/hourly-plume-plan.md). The existing daily
-pipeline remains the default until hourly coverage has been ingested. Set
-`HOURLY_PLUMES_ENABLED=1` to route `/ask` through the new local-first parser.
+See [the implementation spec](docs/hourly-plume-plan.md). Hourly routing is enabled by default. Set
+`HOURLY_PLUMES_ENABLED=0` to temporarily use the legacy route until recent hourly
+coverage and the archive index are available.
 `JEV_ENABLED` applies only to the legacy route; the hourly route never calls Jev.
 
 - Straightforward queries resolve locally. An unresolved query uses at most one
@@ -37,7 +37,7 @@ pipeline remains the default until hourly coverage has been ingested. Set
   `/frames/batch` returns gzip-compressed little-endian float32 arrays in
   `(time, lat, lon)` order; NaN means missing. The manifest fixes the display
   scale at AOD 0–1, with higher values saturated. Numeric data are not clipped.
-- `frontend/app16.js` displays the first batch immediately and loads the rest
+- `frontend/app17.js` displays the first batch immediately and loads the rest
   sequentially while playing. It reuses a MapLibre canvas source, supports
   pause/scrub/basemap changes, and aborts obsolete requests.
 
@@ -69,7 +69,7 @@ for both and monitor pins separately. Environment controls:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `HOURLY_PLUMES_ENABLED` | `0` | Opt into hourly `/ask` routing |
+| `HOURLY_PLUMES_ENABLED` | `1` | Enable hourly `/ask` routing |
 | `HOURLY_FIELDS_DIR` | `/data/hourly` | Hourly Zarr store |
 | `HOURLY_RETAIN_DAYS` | `7` | Protected recent days during cold-request eviction |
 | `HOURLY_CACHE_MAX_MB` | `2048` | Historical cache budget, excluding recent/pinned data |
@@ -85,7 +85,7 @@ separate `HOURLY_BATCH_CACHE_MAX_MB=256` LRU budget. Equivalent native-cell
 selections reuse a response; overlapping but different batches do not yet share
 an on-disk source-chunk cache. Archive jobs are serialized across processes and
 use four Dask workers. Warm reads bypass the archive lock. Missing hours/cells
-fail explicitly rather than skipping gaps. Full-day ingestion remains available
+fail explicitly rather than skipping gaps. Existing bbox-day patches are also reused. Full-day ingestion remains available
 for the recent rolling window and explicitly preloaded events.
 
 Deployment: deploy the backend normally (`fly deploy`); no AWS migration or

@@ -142,15 +142,140 @@ def ensure_day(var, day):
 
 
 def coordinates(bbox):
+    w, s, e, n = _expanded_bbox(bbox)
+    yi, lats = fields._lat_index(s, n)
+    xi, lons = fields._lon_index(w, e)
+    return yi, xi, lats.tolist(), lons.tolist()
+
+
+def _expanded_bbox(bbox):
+    """Parse and expand a bbox to native MERRA-2 cell centers.
+
+    Shared by coordinates() and the patch store so a cropped fetch selects
+    exactly the cells a later read expects.
+    """
     w, s, e, n = grid._parse_bbox(bbox)
     if w == e:
         raise grid.BadGridRequestError("Bounding box west and east must differ.")
     # Expand small city viewports to native cell centers; do not invent resolution.
     s, n = max(-90, np.floor(s * 2) / 2), min(90, np.ceil(n * 2) / 2)
     w, e = max(-180, np.floor(w / .625) * .625), min(180, np.ceil(e / .625) * .625)
-    yi, lats = fields._lat_index(s, n)
-    xi, lons = fields._lon_index(w, e)
-    return yi, xi, lats.tolist(), lons.tolist()
+    return w, s, e, n
+
+
+# --------------------------------------------------------------------------
+# Bbox-cropped patch store (cold-path fast lane)
+#
+# A cold historical query for one variable and one viewport does not need
+# the full 120MB global day: NASA's NetCDF chunks are (1h, 91lat, 144lon),
+# so kerchunk range reads fetch only the chunks intersecting the bbox
+# (typically ~1MB for a city-sized query). Patches are keyed by exact
+# expanded bbox; the full global day remains the canonical reusable unit
+# for the hot rolling window.
+
+def patch_key(bbox):
+    """Stable hash of an expanded bbox for patch filenames."""
+    import hashlib
+    w, s, e, n = _expanded_bbox(bbox)
+    norm = f"{w:.4f},{s:.4f},{e:.4f},{n:.4f}"
+    return hashlib.sha256(norm.encode()).hexdigest()[:16]
+
+
+def patch_path(var, day, key):
+    return root() / variable_name(var) / 'patches' / f"{day}_{key}.zarr"
+
+
+def find_patch(var, day, bbox):
+    """Return the stored patch for this exact (variable, day, bbox), or None."""
+    p = patch_path(var, day, patch_key(bbox))
+    try:
+        meta = json.loads((p / 'complete.json').read_text())
+    except (OSError, ValueError):
+        return None
+    if meta.get('version') == 1 and meta.get('hours') == 24:
+        return p
+    return None
+
+
+def publish_patch(var, day, bbox, da):
+    """Atomically publish a bbox-cropped variable-day. Caller holds writer_lock.
+
+    The patch grid must equal coordinates(bbox): same cells, same order,
+    so reads need no remapping.
+    """
+    import zarr
+    var = variable_name(var)
+    day = date.fromisoformat(day).isoformat()
+    _, _, lats, lons = coordinates(bbox)
+    expected = stamps(day)
+    actual = [grid._parse_time(str(t).replace(' ', 'T'), 'hourly timestamp')
+              for t in da.time.values]
+    if actual != expected:
+        raise grid.GridFetchError(f'{day}: expected all 24 hourly centers, 00:30–23:30 UTC.')
+    arr = np.asarray(da.values, dtype='<f4')
+    if arr.shape != (24, len(lats), len(lons)):
+        raise grid.GridFetchError(f'Unexpected patch shape: {arr.shape}')
+    if not (np.allclose(np.asarray(da.lat.values), lats) and
+            np.allclose(np.asarray(da.lon.values), lons)):
+        raise grid.GridFetchError('Patch grid does not match coordinates(bbox).')
+    arr = arr.copy()
+    arr[~np.isfinite(arr)] = np.nan
+    target = patch_path(var, day, patch_key(bbox))
+    if (target / 'complete.json').exists():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix='.patch-', dir=target.parent))
+    try:
+        ny, nx = arr.shape[1], arr.shape[2]
+        store = zarr.open_array(str(tmp), mode='w', shape=arr.shape,
+                                chunks=(6, min(91, ny), min(144, nx)), dtype='<f4')
+        store[:] = arr
+        (tmp / 'complete.json').write_text(json.dumps({
+            'version': 1, 'hours': 24,
+            'bbox': list(_expanded_bbox(bbox)),
+            'lats': lats, 'lons': lons}))
+        if target.exists():
+            shutil.rmtree(target)  # recovery of a previously incomplete patch
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            shutil.rmtree(tmp)
+    return target
+
+
+def ensure_patch(var, day, bbox):
+    """Materialize one variable-day cropped to bbox via kerchunk range reads.
+
+    Only the NASA chunks intersecting the bbox are fetched (single variable).
+    Returns the patch path.
+    """
+    var = variable_name(var)
+    day = date.fromisoformat(day).isoformat()
+    p = find_patch(var, day, bbox)
+    if p:
+        return p
+    with writer_lock('.archive.lock'):
+        p = find_patch(var, day, bbox)
+        if p:
+            return p
+        w, s, e, n = _expanded_bbox(bbox)
+        first, last = stamps(day)[0], stamps(day)[-1]
+        manifest = grid._load_manifest(grid._index_path())
+        refs = grid._refs_for_window(manifest, first, last)
+        datasets = grid._open_datasets(refs, grid._default_target_options(refs))
+        try:
+            # Lazy: only chunks intersecting the bbox are fetched on compute().
+            da = grid.slice_variable(datasets[0], var, (w, s, e, n), first, last)
+            da = da.transpose('time', 'lat', 'lon').sortby('lat').sortby('lon')
+            if len(da.time) != 24:
+                raise grid.GridFetchError(
+                    f'{day}: expected 24 hourly steps, got {len(da.time)}.')
+            da = da.compute()
+            with writer_lock():
+                return publish_patch(var, day, bbox, da)
+        finally:
+            for ds in datasets:
+                ds.close()
 
 
 def window(t0, t1):
@@ -175,10 +300,13 @@ def frame_manifest(variable, bbox, t0, t1):
     _, _, lats, lons = coordinates(bbox)
     cached = coverage(var)
     needed = {t.date() for t in times}
-    if not needed <= cached:
+    # Dates servable from a patch don't need a manifest check either.
+    uncached = {d for d in needed - cached
+                if not find_patch(var, d.isoformat(), bbox)}
+    if uncached:
         index = grid._load_manifest(grid._index_path())
         # Check every date, rather than allowing sparse manifest windows.
-        for d in needed - cached:
+        for d in uncached:
             grid._refs_for_window(index, stamps(d.isoformat())[0], stamps(d.isoformat())[-1])
     batches = []
     for offset in range(0, len(times), 6):
@@ -262,6 +390,12 @@ def frame_batch(variable, bbox, t0, t1):
                 arr = zarr.open_array(str(path), mode='r')
                 frames[t] = np.asarray(arr.oindex[t.hour, yi, xi], dtype='<f4')
                 os.utime(path, None)
+            else:
+                path = find_patch(var, t.date().isoformat(), bbox)
+                if path is not None:
+                    arr = zarr.open_array(str(path), mode='r')
+                    frames[t] = np.asarray(arr[t.hour], dtype='<f4')
+                    os.utime(path, None)
     missing = [t for t in times if t not in frames]
     if not missing:
         return gzip.compress(np.stack([frames[t] for t in times]).astype('<f4').tobytes(), compresslevel=1, mtime=0)
@@ -307,9 +441,26 @@ def prune(retain_days=7, max_mb=2048, pinned=()):
         for var in MERRA2_COLUMN_VARIABLES:
             days = sorted(coverage(var), reverse=True)
             protected = set(days[:retain_days]) | set(pinned)
+            full = set(days)
             for d in days:
                 if d not in protected:
                     p = day_path(var, d.isoformat())
+                    size = sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
+                    candidates.append((p.stat().st_mtime, size, p))
+            # Patches share the historical budget. A patch made redundant by
+            # a full global day is dropped outright.
+            pdir = root() / var / 'patches'
+            if pdir.is_dir():
+                for p in pdir.glob('*.zarr'):
+                    try:
+                        pday = date.fromisoformat(p.stem.split('_')[0])
+                    except ValueError:
+                        continue
+                    if pday in full:
+                        shutil.rmtree(p)
+                        continue
+                    if pday in protected or pday in pinned:
+                        continue
                     size = sum(f.stat().st_size for f in p.rglob('*') if f.is_file())
                     candidates.append((p.stat().st_mtime, size, p))
         total = sum(item[1] for item in candidates)
