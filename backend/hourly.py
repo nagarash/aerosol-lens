@@ -359,9 +359,17 @@ def _remote_frames(var, times, yi, xi, lats, lons):
             # Explicit coordinate selection preserves wrapped longitude order and
             # fails on missing hours/cells instead of silently returning a gap.
             # Integer isel for lat/lon avoids float precision mismatches.
-            da = datasets[0][var].sel(
+            # The dataset's lat may be ascending or descending; adjust indices.
+            ds_var = datasets[0][var]
+            lat_vals = ds_var['lat'].values
+            if lat_vals[0] > lat_vals[-1]:
+                # Descending lat: mirror the ascending-grid indices.
+                yi_use = len(lat_vals) - 1 - yi
+            else:
+                yi_use = yi
+            da = ds_var.sel(
                 time=np.array([t.replace(tzinfo=None) for t in selected], dtype='datetime64[ns]'),
-            ).isel(lat=yi, lon=xi).transpose('time', 'lat', 'lon')
+            ).isel(lat=yi_use, lon=xi).transpose('time', 'lat', 'lon')
             # Default scheduler: the /grid path materializes kerchunk reads this
             # way in production. An explicit threaded scheduler is unproven
             # against the async reference filesystem; keep this on the path
