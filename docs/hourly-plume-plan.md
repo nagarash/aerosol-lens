@@ -75,3 +75,14 @@ hourly coverage, run live model evals, measure cold retrieval and first-frame
 latency on the deployment, and then set HOURLY_PLUMES_ENABLED=1. An external
 scheduler should run indexing/ingestion; no deployment or recurring job has
 been started by this implementation.
+
+
+### Regional request-time reads
+
+Cold hourly batches now select native bbox cells and requested timestamps before
+computing kerchunk-backed arrays. Full-day ingestion is reserved for explicit
+preloading. Six-hour responses use a separate 256 MB bounded disk cache keyed by
+variable, native coordinates and timestamps. This caches exact regional batches,
+not shared source chunks. Upstream chunk layout still controls read amplification.
+Archive jobs remain serialized with four Dask compute workers; warm reads bypass
+the archive lock. Validate cold and repeated historical batches after deployment.

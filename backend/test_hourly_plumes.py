@@ -176,7 +176,7 @@ def test_relative_duration_has_no_extra_calendar_day():
     assert len(hourly.window(p.time_start.isoformat(), p.time_end.isoformat())) == 48
 
 
-def test_cold_day_preserves_hours_and_is_reused(monkeypatch, tmp_path):
+def test_cold_region_preserves_hours_and_is_reused(monkeypatch, tmp_path):
     import xarray as xr
     monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
     data = np.broadcast_to(np.arange(24, dtype='float32')[:,None,None], (24,361,576))
@@ -188,7 +188,10 @@ def test_cold_day_preserves_hours_and_is_reused(monkeypatch, tmp_path):
          patch.object(hourly.grid, '_open_datasets', return_value=[ds]) as opened:
         one = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T00:30:00Z','2020-01-01T05:30:00Z')
         two = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T06:30:00Z','2020-01-01T11:30:00Z')
-        assert opened.call_count == 1
+        repeat = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T00:30:00Z','2020-01-01T05:30:00Z')
+        assert repeat == one
+        assert opened.call_count == 2
+        assert not hourly.coverage('DUEXTTAU')  # partial regions are never full-day coverage
         assert np.frombuffer(gzip.decompress(one),dtype='<f4')[0] == 0
         assert np.frombuffer(gzip.decompress(two),dtype='<f4')[0] == 6
 
@@ -242,3 +245,64 @@ def test_interpretation_cache_reuses_only_valid_output(monkeypatch):
                 api._cached_hourly_interpretation('mock/test', messages)
         assert completion.call_count == 2
     api._cached_hourly_interpretation.cache_clear()
+
+
+@pytest.mark.parametrize('bbox', ['0.1,0.1,0.2,0.2', '179,-1,-179,1'])
+def test_remote_computes_only_selected_cells_and_hours(monkeypatch, tmp_path, bbox):
+    import xarray as xr
+    import dask.array as da
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    _, _, lats, lons = hourly.coordinates(bbox)
+    computed = []
+    original = xr.DataArray.compute
+    def checked(self, **kwargs):
+        computed.append(self.shape)
+        assert self.shape == (2, len(lats), len(lons))
+        return original(self, **kwargs)
+    datasets = []
+    for day in ['2020-01-01', '2020-01-02']:
+        values = da.broadcast_to(da.arange(24, chunks=1)[:, None, None], (24,361,576))
+        datasets.append(xr.Dataset({'DUEXTTAU': (('time','lat','lon'), values)}, coords={
+            'time': np.array([t.replace(tzinfo=None) for t in hourly.stamps(day)], dtype='datetime64[ns]'),
+            'lat':hourly.fields._latitudes(), 'lon':hourly.fields._longitudes()}))
+    with patch.object(hourly.grid, '_load_manifest', return_value={'files':{d:'local.json' for d in ['2020-01-01','2020-01-02']}}), \
+         patch.object(hourly.grid, '_default_target_options', return_value={}), \
+         patch.object(hourly.grid, '_open_datasets', side_effect=[[ds] for ds in datasets]), \
+         patch.object(xr.DataArray, 'compute', checked), \
+         patch.object(hourly, 'ensure_day', side_effect=AssertionError('Full day fetch forbidden')):
+        payload = hourly.frame_batch('DUEXTTAU', bbox, '2020-01-01T22:30:00Z', '2020-01-02T01:30:00Z')
+    values = np.frombuffer(gzip.decompress(payload), dtype='<f4').reshape(4,len(lats),len(lons))
+    assert values[:,0,0].tolist() == [22,23,0,1]
+    assert len(computed) == 2
+
+
+def test_remote_missing_hour_is_error(monkeypatch, tmp_path):
+    import xarray as xr
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    ds = xr.Dataset({'DUEXTTAU': (('time','lat','lon'), np.zeros((1,1,1)))},
+                    coords={'time': [np.datetime64('2020-01-01T00:30')], 'lat':[0.], 'lon':[0.]})
+    with patch.object(hourly.grid, '_load_manifest', return_value={'files':{'2020-01-01':'local.json'}}), \
+         patch.object(hourly.grid, '_default_target_options', return_value={}), \
+         patch.object(hourly.grid, '_open_datasets', return_value=[ds]):
+        with pytest.raises(GridFetchError):
+            hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T00:30:00Z','2020-01-01T01:30:00Z')
+    assert not list((tmp_path/'batches').glob('*.gz'))
+
+
+def test_regional_cache_eviction_and_warm_day_mix(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    monkeypatch.setenv('HOURLY_BATCH_CACHE_MAX_MB', '0')
+    data = np.broadcast_to(np.arange(24, dtype='float32')[:,None,None], (24,361,576))
+    with hourly.writer_lock():
+        hourly.publish('DUEXTTAU', '2020-01-01', data, hourly.stamps('2020-01-01'))
+    def remote(var, times, lats, lons):
+        assert [t.hour for t in times] == [0,1]
+        assert all(t.date() == date(2020,1,2) for t in times)
+        return [np.full((len(lats),len(lons)), t.hour, dtype='<f4') for t in times]
+    with patch.object(hourly, '_remote_frames', side_effect=remote):
+        payload = hourly.frame_batch('DUEXTTAU','0,0,1,1','2020-01-01T22:30:00Z','2020-01-02T01:30:00Z')
+    _, _, lats, lons = hourly.coordinates('0,0,1,1')
+    values = np.frombuffer(gzip.decompress(payload), dtype='<f4').reshape(4,len(lats),len(lons))
+    assert values[:,0,0].tolist() == [22,23,0,1]
+    assert not list((tmp_path/'batches').glob('*.gz'))
+    assert hourly.coverage('DUEXTTAU') == {date(2020,1,1)}

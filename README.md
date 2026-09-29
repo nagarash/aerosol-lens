@@ -75,12 +75,26 @@ for both and monitor pins separately. Environment controls:
 | `HOURLY_CACHE_MAX_MB` | `2048` | Historical cache budget, excluding recent/pinned data |
 
 CLI retention flags control eviction after ingestion. Cold historical requests
-fetch and cache a complete variable-day, then crop it for playback. This trades
-higher first-request transfer for reuse across hours and viewports. Archive
-fetches are serialized across processes to bound memory on the 1 GB server;
-warm reads do not wait on the archive lock. This first implementation does not
-claim optimized cold-download latency or a benchmark-selected chunk shape.
-Missing indexed days fail explicitly rather than skipping gaps unnoticed.
+select only the requested native cells and hours before computing a lazy
+kerchunk slice. No full variable-day is downloaded or published on this path.
+Compressed source chunks can still contain cells outside the bbox; transfer
+savings depend on the original NetCDF chunk layout.
+
+Regional binary responses are cached under `HOURLY_FIELDS_DIR/batches`, with a
+separate `HOURLY_BATCH_CACHE_MAX_MB=256` LRU budget. Equivalent native-cell
+selections reuse a response; overlapping but different batches do not yet share
+an on-disk source-chunk cache. Archive jobs are serialized across processes and
+use four Dask workers. Warm reads bypass the archive lock. Missing hours/cells
+fail explicitly rather than skipping gaps. Full-day ingestion remains available
+for the recent rolling window and explicitly preloaded events.
+
+Deployment: deploy the backend normally (`fly deploy`); no AWS migration or
+frontend change is required for this optimization. Keep `HOURLY_PLUMES_ENABLED=0`
+until the indexed archive and recent hourly coverage are available, then enable
+it to use the hourly route. Existing hourly deployments can retain their flag.
+Smoke-test a historical bbox outside the preloaded window through `/frames` and
+its batch URLs, repeat it to verify caching, and check a recent query. Compare
+first-frame and complete-playback timings before claiming a latency improvement.
 
 ### Verification and evals
 

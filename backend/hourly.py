@@ -1,8 +1,8 @@
 """Hourly MERRA-2 storage and six-hour binary frame batches.
 
 Each immutable variable/day Zarr is published by atomic rename after validation.
-Daily means are never used. Cold indexed days are fetched one variable at a time
-under a process-wide file lock, bounding archive concurrency and peak memory.
+Daily means are never used. Request-time misses fetch only selected cells/hours.
+Full-day ingestion is an explicit CLI operation; archive jobs are serialized.
 Run: python -m backend.hourly --start YYYY-MM-DD --end YYYY-MM-DD
 """
 from __future__ import annotations
@@ -12,11 +12,13 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import fcntl
 import gzip
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
+import zlib
 from urllib.parse import urlencode
 
 import numpy as np
@@ -192,28 +194,102 @@ def frame_manifest(variable, bbox, t0, t1):
             'time_start': times[0].isoformat(), 'time_end': times[-1].isoformat()}
 
 
+def _remote_frames(var, times, lats, lons):
+    """Select native coordinates and hours lazily before any aerosol reads."""
+    manifest = grid._load_manifest(grid._index_path())
+    frames = []
+    for day in sorted({t.date() for t in times}):
+        selected = [t for t in times if t.date() == day]
+        refs = grid._refs_for_window(manifest, selected[0], selected[-1])
+        datasets = grid._open_datasets(refs, grid._default_target_options(refs))
+        try:
+            if len(datasets) != 1:
+                raise grid.GridFetchError('Expected one hourly granule per date.')
+            # Explicit coordinate selection preserves wrapped longitude order and
+            # fails on missing hours/cells instead of silently returning a gap.
+            da = datasets[0][var].sel(
+                time=np.array([t.replace(tzinfo=None) for t in selected], dtype='datetime64[ns]'),
+                lat=lats, lon=lons).transpose('time', 'lat', 'lon')
+            data = np.asarray(da.compute(scheduler='threads', num_workers=4).values, dtype='<f4')
+            if data.shape != (len(selected), len(lats), len(lons)):
+                raise grid.GridFetchError('Unexpected regional hourly shape.')
+            data = data.copy()
+            data[~np.isfinite(data)] = np.nan
+            frames.extend(data)
+        except grid.GridFetchError:
+            raise
+        except Exception as exc:
+            raise grid.GridFetchError(f'Regional hourly read failed: {exc}') from exc
+        finally:
+            for ds in datasets:
+                ds.close()
+    return frames
+
+
 def frame_batch(variable, bbox, t0, t1):
     import zarr
     var = variable_name(variable)
     times = window(t0, t1)
     if len(times) > 6:
         raise grid.BadGridRequestError('A batch may contain at most six hours.')
-    yi, xi, _, _ = coordinates(bbox)
-    cold = not {t.date() for t in times} <= coverage(var)
-    for d in sorted({t.date().isoformat() for t in times}):
-        ensure_day(var, d)
-    # Hold the retention lock during local reads, preventing eviction races.
+    yi, xi, lats, lons = coordinates(bbox)
+    # Cache the normalized native-cell selection, not the user's bbox spelling.
+    key = hashlib.sha256(json.dumps([1, var, [t.isoformat() for t in times],
+                                     lats, lons]).encode()).hexdigest()
+    cache = root() / 'batches'
+    target = cache / (key + '.gz')
+
+    def read_cached():
+        try:
+            payload = target.read_bytes()
+            if len(gzip.decompress(payload)) != len(times) * len(lats) * len(lons) * 4:
+                return None
+            os.utime(target, None)
+            return payload
+        except (OSError, EOFError, zlib.error):
+            return None
+
+    hit = read_cached()
+    if hit is not None:
+        return hit
+    # Keep warm reads independent of the archive lock and protect against eviction.
+    frames = {}
     with writer_lock():
-        frames = []
+        stored = coverage(var)
         for t in times:
-            arr = zarr.open_array(str(day_path(var, t.date().isoformat())), mode='r')
-            frames.append(np.asarray(arr.oindex[t.hour, yi, xi], dtype='<f4'))
-            os.utime(day_path(var, t.date().isoformat()), None)
-    payload = gzip.compress(np.stack(frames).astype('<f4').tobytes(), compresslevel=1, mtime=0)
-    if cold:
-        prune(int(os.environ.get("HOURLY_RETAIN_DAYS", "7")),
-              int(os.environ.get("HOURLY_CACHE_MAX_MB", "2048")))
-    return payload
+            if t.date() in stored:
+                path = day_path(var, t.date().isoformat())
+                arr = zarr.open_array(str(path), mode='r')
+                frames[t] = np.asarray(arr.oindex[t.hour, yi, xi], dtype='<f4')
+                os.utime(path, None)
+    missing = [t for t in times if t not in frames]
+    if not missing:
+        return gzip.compress(np.stack([frames[t] for t in times]).astype('<f4').tobytes(), compresslevel=1, mtime=0)
+    # Bound concurrent archive jobs on small hosts; warm cache hits bypass this.
+    with writer_lock('.archive.lock'):
+        hit = read_cached()
+        if hit is not None:
+            return hit
+        frames.update(zip(missing, _remote_frames(var, missing, lats, lons)))
+        payload = gzip.compress(np.stack([frames[t] for t in times]).astype('<f4').tobytes(), compresslevel=1, mtime=0)
+        cache.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=cache, prefix='.batch-', delete=False) as f:
+            tmp = Path(f.name)
+            try:
+                f.write(payload)
+                f.close()
+                os.replace(tmp, target)
+            finally:
+                tmp.unlink(missing_ok=True)
+        cap = max(0, int(os.environ.get('HOURLY_BATCH_CACHE_MAX_MB', '256'))) * 1024**2
+        entries = sorted((p.stat().st_mtime, p.stat().st_size, p) for p in cache.glob('*.gz'))
+        total = sum(size for _, size, _ in entries)
+        for _, size, path in entries:
+            if total <= cap:
+                break
+            path.unlink(missing_ok=True)
+            total -= size
+        return payload
 
 
 def prune(retain_days=7, max_mb=2048, pinned=()):
