@@ -295,7 +295,7 @@ def test_regional_cache_eviction_and_warm_day_mix(monkeypatch, tmp_path):
     data = np.broadcast_to(np.arange(24, dtype='float32')[:,None,None], (24,361,576))
     with hourly.writer_lock():
         hourly.publish('DUEXTTAU', '2020-01-01', data, hourly.stamps('2020-01-01'))
-    def remote(var, times, lats, lons):
+    def remote(var, times, yi, xi, lats, lons):
         assert [t.hour for t in times] == [0,1]
         assert all(t.date() == date(2020,1,2) for t in times)
         return [np.full((len(lats),len(lons)), t.hour, dtype='<f4') for t in times]

@@ -339,8 +339,12 @@ def frame_manifest(variable, bbox, t0, t1):
             'time_start': times[0].isoformat(), 'time_end': times[-1].isoformat()}
 
 
-def _remote_frames(var, times, lats, lons):
-    """Select native coordinates and hours lazily before any aerosol reads."""
+def _remote_frames(var, times, yi, xi, lats, lons):
+    """Select native coordinates and hours lazily before any aerosol reads.
+
+    Uses integer indices (isel) for lat/lon to avoid float coordinate
+    matching issues; time uses sel on exact datetime64 values.
+    """
     manifest = grid._load_manifest(grid._index_path())
     frames = []
     for day in sorted({t.date() for t in times}):
@@ -349,23 +353,31 @@ def _remote_frames(var, times, lats, lons):
         datasets = grid._open_datasets(refs, grid._default_target_options(refs))
         try:
             if len(datasets) != 1:
+                log.error("hourly _remote_frames expected 1 granule for %s, got %d",
+                          selected[0].date(), len(datasets))
                 raise grid.GridFetchError('Expected one hourly granule per date.')
             # Explicit coordinate selection preserves wrapped longitude order and
             # fails on missing hours/cells instead of silently returning a gap.
+            # Integer isel for lat/lon avoids float precision mismatches.
             da = datasets[0][var].sel(
                 time=np.array([t.replace(tzinfo=None) for t in selected], dtype='datetime64[ns]'),
-                lat=lats, lon=lons).transpose('time', 'lat', 'lon')
+            ).isel(lat=yi, lon=xi).transpose('time', 'lat', 'lon')
             # Default scheduler: the /grid path materializes kerchunk reads this
             # way in production. An explicit threaded scheduler is unproven
             # against the async reference filesystem; keep this on the path
             # that is known to work until a threaded variant is validated.
             data = np.asarray(da.compute().values, dtype='<f4')
-            if data.shape != (len(selected), len(lats), len(lons)):
-                raise grid.GridFetchError('Unexpected regional hourly shape.')
+            expected = (len(selected), len(lats), len(lons))
+            if data.shape != expected:
+                log.error("hourly _remote_frames shape mismatch for %s %s: got %s, expected %s",
+                          var, selected[0].date(), data.shape, expected)
+                raise grid.GridFetchError(
+                    f'Unexpected regional hourly shape: got {data.shape}, expected {expected}.')
             data = data.copy()
             data[~np.isfinite(data)] = np.nan
             frames.extend(data)
         except grid.GridFetchError:
+            # Already logged above where raised; re-raise for the 502 mapping.
             raise
         except Exception as exc:
             # Log the full traceback server-side: the /frames/batch endpoint
@@ -429,7 +441,7 @@ def frame_batch(variable, bbox, t0, t1):
         hit = read_cached()
         if hit is not None:
             return hit
-        frames.update(zip(missing, _remote_frames(var, missing, lats, lons)))
+        frames.update(zip(missing, _remote_frames(var, missing, yi, xi, lats, lons)))
         payload = gzip.compress(np.stack([frames[t] for t in times]).astype('<f4').tobytes(), compresslevel=1, mtime=0)
         cache.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=cache, prefix='.batch-', delete=False) as f:

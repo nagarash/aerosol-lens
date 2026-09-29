@@ -13,3 +13,5 @@ data/.geo_cache/
 *.hdf
 .DS_Store
 .wrangler/
+.data/
+ingest_hourly.py
