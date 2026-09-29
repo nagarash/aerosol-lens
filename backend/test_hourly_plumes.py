@@ -355,3 +355,43 @@ def test_full_day_preferred_over_patch_and_prune_drops_redundant(monkeypatch, tm
     hourly.prune(retain_days=7, max_mb=2048)
     assert not fake.exists()
     assert hourly.day_path('DUEXTTAU', '2020-01-01').exists()
+
+
+@pytest.mark.parametrize('question', ['sahara dust', 'sahara dust right now', 'sahara dust a few days ago'])
+def test_recent_query_uses_index_without_ingestion(monkeypatch, tmp_path, question):
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path/'hourly'))
+    monkeypatch.setenv('HOURLY_PLUMES_ENABLED', '1')
+    index = {'files': {'2026-08-24':'a.json', '2026-08-25':'b.json'}}
+    with patch.object(hourly.grid, '_load_manifest', return_value=index), \
+         patch.object(api, '_hourly_model_call', side_effect=AssertionError('No model needed')):
+        with TestClient(api.app) as client:
+            response = client.post('/ask', json={'question':question, 'reference_date':'2026-09-28'})
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result['plan']['variable'] == 'DUEXTTAU'
+        assert result['plan']['time_start'].startswith('2026-08-24T00:30')
+        assert result['plan']['time_end'].startswith('2026-08-25T23:30')
+        assert result['data_url'].startswith('/frames?')
+    assert hourly.coverage('DUEXTTAU') == set()
+
+
+def test_latest_index_window_skips_gaps_and_supersedes_old_cache(monkeypatch, tmp_path):
+    monkeypatch.setenv('HOURLY_FIELDS_DIR', str(tmp_path))
+    index = {'files': {'2026-08-24':'a', '2026-08-25':'b', '2026-08-27':'c', 'invalid':'d'}}
+    with patch.object(hourly, 'coverage', return_value={date(2026,8,1),date(2026,8,2)}), \
+         patch.object(hourly.grid, '_load_manifest', return_value=index):
+        start, end = hourly.latest_window('DUEXTTAU')
+    assert start == datetime(2026,8,24,0,30,tzinfo=UTC)
+    assert end == datetime(2026,8,25,23,30,tzinfo=UTC)
+
+
+def test_latest_window_can_combine_local_and_indexed_days(monkeypatch):
+    with patch.object(hourly, 'coverage', return_value={date(2026,8,24)}), \
+         patch.object(hourly.grid, '_load_manifest', return_value={'files':{'2026-08-25':'b'}}):
+        assert hourly.latest_window('DUEXTTAU')[1] == LATEST
+
+
+def test_latest_window_local_only_without_index():
+    with patch.object(hourly, 'coverage', return_value={date(2026,8,24),date(2026,8,25)}), \
+         patch.object(hourly.grid, '_load_manifest', side_effect=IndexNotBuiltError('missing')):
+        assert hourly.latest_window('DUEXTTAU')[1] == LATEST

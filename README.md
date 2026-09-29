@@ -17,8 +17,8 @@ and return an honest `422`, never column data dressed up as an answer.
 ## Hourly plume pipeline
 
 See [the implementation spec](docs/hourly-plume-plan.md). Hourly routing is enabled by default. Set
-`HOURLY_PLUMES_ENABLED=0` to temporarily use the legacy route until recent hourly
-coverage and the archive index are available.
+`HOURLY_PLUMES_ENABLED=0` to temporarily use the legacy route until an archive index or recent hourly
+coverage is available.
 `JEV_ENABLED` applies only to the legacy route; the hourly route never calls Jev.
 
 - Straightforward queries resolve locally. An unresolved query uses at most one
@@ -90,7 +90,7 @@ for the recent rolling window and explicitly preloaded events.
 
 Deployment: deploy the backend normally (`fly deploy`); no AWS migration or
 frontend change is required for this optimization. Keep `HOURLY_PLUMES_ENABLED=0`
-until the indexed archive and recent hourly coverage are available, then enable
+until an archive index or recent hourly coverage is available, then enable
 it to use the hourly route. Existing hourly deployments can retain their flag.
 Smoke-test a historical bbox outside the preloaded window through `/frames` and
 its batch URLs, repeat it to verify caching, and check a recent query. Compare
@@ -391,3 +391,9 @@ questions intentionally return 422.
 ## License
 
 MIT — see `LICENSE`.
+
+
+Recent hourly queries resolve the latest contiguous window across preloaded
+variable-days and indexed MERRA-2 granules. A local hourly store is optional:
+with two contiguous indexed dates, a default 48-hour query can fetch regional
+batches on demand. Gaps are never filled with invented or daily-mean frames.

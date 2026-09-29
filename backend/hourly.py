@@ -64,14 +64,28 @@ def coverage(var):
 def latest_window(var, hours=48):
     if not 1 <= hours <= MAX_HOURS:
         raise grid.BadGridRequestError('Hourly windows must contain 1–168 frames.')
+    # Local preloading is optional: indexed source granules can serve regional
+    # hourly reads on demand. Use the union so an older warm cache never hides
+    # newer indexed data, and still require a gap-free requested window.
     days = coverage(var)
+    try:
+        manifest = grid._load_manifest(grid._index_path())
+    except grid.IndexNotBuiltError:
+        manifest = {}
+    for value, ref in manifest.get('files', {}).items():
+        if not ref:
+            continue
+        try:
+            days.add(date.fromisoformat(value))
+        except (ValueError, TypeError):
+            continue
     for end_day in sorted(days, reverse=True):
         end = stamps(end_day.isoformat())[-1]
         start = end - timedelta(hours=hours - 1)
         needed = { (start + timedelta(hours=h)).date() for h in range(hours) }
         if needed <= days:
             return start, end
-    raise grid.IndexNotBuiltError('No complete recent hourly window is stored for this variable. Run the hourly ingestion command first.')
+    raise grid.IndexNotBuiltError('No contiguous hourly window is available in the local store or MERRA-2 index. Update the archive index or preload hourly data.')
 
 
 @contextmanager
